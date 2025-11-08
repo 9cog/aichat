@@ -1,0 +1,788 @@
+/*
+ * AIChat System - Operations Formal Specification (Z++)
+ * 
+ * This specification formalizes the core operations and state transitions
+ * of the AIChat system across all working modes.
+ *
+ * The specification models:
+ * - Configuration operations (model selection, session management)
+ * - Chat completion operations (streaming and non-streaming)
+ * - Session lifecycle operations
+ * - RAG operations (indexing and retrieval)
+ * - Function calling operations
+ * - REPL command operations
+ */
+
+─────────────────────────────────────────────────────────────────
+ IMPORTS
+─────────────────────────────────────────────────────────────────
+
+IMPORT formal_spec_data_model
+IMPORT formal_spec_system_state
+
+─────────────────────────────────────────────────────────────────
+ SECTION 1: Configuration Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * SetModel: Change the active model
+ * Corresponds to Config::set_model in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ SetModel
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ model_id? : MODELID
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Model ID must refer to a known model */
+│ ∃ i : dom config.clients; j : dom config.clients(i).models •
+│   model_id? = config.clients(i).name ++ ":" ++ 
+│                config.clients(i).models(j).name
+│
+│ /* Postconditions */
+│ /* Model is updated */
+│ config'.model.id = model_id?
+│
+│ /* If session active, update session model */
+│ is_session_active(θSystemState) ⇒
+│   config'.active_session.model = config'.model
+│
+│ /* All other state unchanged */
+│ session_registry' = session_registry
+│ rag_registry' = rag_registry
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * UseRole: Activate a role (prompt template)
+ * Corresponds to Config::use_role in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ UseRole
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ role_name? : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Role must exist */
+│ role_name? ≠ "" ⇒
+│   exists(config.roles_dir ++ "/" ++ role_name? ++ ".md") ∨
+│   exists(config.roles_dir ++ "/" ++ role_name? ++ ".yaml")
+│
+│ /* Postconditions */
+│ /* Role is activated */
+│ config'.active_role.name = role_name?
+│
+│ /* If role has model preference, update model */
+│ config'.active_role.model_id ≠ "" ⇒
+│   config'.model.id = config'.active_role.model_id
+│
+│ /* If session active, update session role */
+│ is_session_active(θSystemState) ⇒
+│   config'.active_session.role_name = role_name?
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * StartSession: Create or resume a session
+ * Corresponds to Config::use_session in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ StartSession
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ session_name? : STRING
+│ create_new? : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* If not creating new, session must exist */
+│ create_new? = false ⇒
+│   session_name? ∈ dom session_registry.sessions
+│
+│ /* Postconditions */
+│ create_new? = true ⇒ (
+│   /* Create new empty session */
+│   config'.active_session.name = session_name?
+│   ∧ config'.active_session.messages = ⟨⟩
+│   ∧ config'.active_session.model = config.model
+│   ∧ config'.active_session.dirty = false
+│   /* Add to registry */
+│   ∧ session_registry'.sessions = 
+│       session_registry.sessions ⊕ 
+│       {session_name? ↦ config'.active_session}
+│ )
+│
+│ create_new? = false ⇒ (
+│   /* Load existing session */
+│   config'.active_session = session_registry.sessions(session_name?)
+│   ∧ session_registry' = session_registry
+│ )
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * EndSession: Save and close active session
+ * Corresponds to Config::exit_session in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EndSession
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ save? : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Session must be active */
+│ is_session_active(θSystemState)
+│
+│ /* Postconditions */
+│ save? = true ⇒ (
+│   /* Save session to file */
+│   write_yaml(config.active_session.path, 
+│              serialize(config.active_session))
+│   /* Update registry */
+│   ∧ session_registry'.sessions = 
+│       session_registry.sessions ⊕ 
+│       {config.active_session.name ↦ config.active_session}
+│ )
+│
+│ /* Clear active session */
+│ config'.active_session.name = ""
+│ ∧ config'.active_session.messages = ⟨⟩
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 2: Input Processing Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * CreateInput: Build input object from user text and files
+ * Corresponds to Input::from_str and Input::from_files
+ */
+┌─────────────────────────────────────────────────────────────────
+│ CreateInput
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ text? : STRING
+│ files? : seq FILEPATH
+│ input! : Input
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Must have text or files */
+│ text? ≠ "" ∨ #files? > 0
+│
+│ /* Postconditions */
+│ /* Input contains text */
+│ input!.text = text?
+│ ∧ input!.raw_files = files?
+│
+│ /* Apply active role prompt if set */
+│ config.active_role.name ≠ "" ⇒
+│   input!.role = config.active_role
+│   ∧ input!.patched_text = 
+│       config.active_role.prompt ++ "\n\n" ++ text?
+│
+│ /* Include session context if active */
+│ input!.with_session = is_session_active(θSystemState)
+│
+│ /* Include agent context if active */
+│ input!.with_agent = is_agent_active(θSystemState)
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * UseEmbeddings: Add RAG context to input
+ * Corresponds to Input::use_embeddings in src/config/input.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ UseEmbeddings
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ Δinput : Input
+│ query? : STRING
+│ context! : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* RAG must be active */
+│ is_rag_active(θSystemState)
+│
+│ /* RAG must be indexed */
+│ config.active_rag.can_query = true
+│
+│ /* Postconditions */
+│ /* Retrieve relevant documents using hybrid search */
+│ let vector_results = hnsw_search(config.active_rag, query?, 
+│                                   config.active_rag.data.top_k)
+│ let keyword_results = bm25_search(config.active_rag, query?, 
+│                                    config.active_rag.data.top_k)
+│
+│ /* Merge and rerank results */
+│ let merged = merge_results(vector_results, keyword_results)
+│ let reranked = rerank(merged, query?, 
+│                       config.active_rag.data.reranker_model)
+│
+│ /* Format context from top results */
+│ context! = format_context(take(reranked, config.active_rag.data.top_k))
+│
+│ /* Update input with RAG template */
+│ input'.text = RAG_TEMPLATE
+│   .replace("__CONTEXT__", context!)
+│   .replace("__INPUT__", query?)
+│
+│ input'.rag_name = config.active_rag.name
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 3: Chat Completion Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * PrepareChatRequest: Build message sequence for LLM request
+ */
+┌─────────────────────────────────────────────────────────────────
+│ PrepareChatRequest
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ input? : Input
+│ messages! : seq Message
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Input must be valid */
+│ input?.text ≠ "" ∨ #input?.medias > 0
+│
+│ /* Postconditions */
+│ let user_message = Message(user, textContent⟨input?.text⟩)
+│
+│ /* Include session history if active */
+│ is_session_active(θSystemState) ⇒ (
+│   let session_msgs = config.active_session.messages ++
+│                      config.active_session.compressed_messages
+│   messages! = session_msgs ++ ⟨user_message⟩
+│ )
+│
+│ ¬is_session_active(θSystemState) ⇒ (
+│   /* No session: just system prompt + user message */
+│   input?.role.prompt ≠ "" ⇒
+│     messages! = ⟨Message(system, textContent⟨input?.role.prompt⟩),
+│                  user_message⟩
+│   input?.role.prompt = "" ⇒
+│     messages! = ⟨user_message⟩
+│ )
+│
+│ /* Ensure within token limits */
+│ within_token_limit(messages!, config.model)
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * CallChatCompletion: Send request to LLM (non-streaming)
+ * Corresponds to call_chat_completions in src/client/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ CallChatCompletion
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ messages? : seq Message
+│ response! : STRING
+│ tool_calls! : seq ToolCall
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Messages must be non-empty */
+│ #messages? > 0
+│
+│ /* Model must support chat */
+│ config.model.data.model_type = chat
+│
+│ /* Postconditions */
+│ /* Send HTTP POST to provider */
+│ let client = create_client(config.model.client_name)
+│ let request_body = build_request(messages?, config)
+│ let http_response = client.post(request_body)
+│
+│ /* Parse response */
+│ response! = http_response.choices(0).message.content
+│
+│ /* Extract tool calls if present */
+│ http_response.choices(0).message.tool_calls ≠ null ⇒
+│   tool_calls! = http_response.choices(0).message.tool_calls
+│
+│ http_response.choices(0).message.tool_calls = null ⇒
+│   tool_calls! = ⟨⟩
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * CallChatCompletionStreaming: Send request with streaming
+ * Corresponds to call_chat_completions_streaming in src/client/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ CallChatCompletionStreaming
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ messages? : seq Message
+│ stream! : Stream⟨STRING⟩
+│ complete_response! : STRING
+│ tool_calls! : seq ToolCall
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Same as non-streaming */
+│ #messages? > 0
+│ ∧ config.model.data.model_type = chat
+│
+│ /* Streaming must be enabled */
+│ config.stream = true
+│
+│ /* Postconditions */
+│ /* Open SSE connection */
+│ let client = create_client(config.model.client_name)
+│ let request_body = build_request(messages?, config)
+│   with stream = true
+│ let sse_stream = client.post_streaming(request_body)
+│
+│ /* Process stream chunks */
+│ stream! = map(sse_stream, parse_sse_event)
+│
+│ /* Accumulate complete response */
+│ complete_response! = fold(stream!, "", concat)
+│
+│ /* Tool calls extracted from final event or accumulated */
+│ tool_calls! = extract_tool_calls(sse_stream)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 4: Function Calling Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * EvaluateToolCalls: Execute function calls from LLM
+ * Corresponds to eval_tool_calls in src/function.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EvaluateToolCalls
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ tool_calls? : seq ToolCall
+│ tool_results! : seq ToolResult
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Tool calls must be non-empty */
+│ #tool_calls? > 0
+│
+│ /* All called functions must exist */
+│ ∀ i : dom tool_calls? •
+│   ∃ decl : config.functions.declarations •
+│     decl.name = tool_calls?(i).name
+│
+│ /* Postconditions */
+│ /* Execute each tool call */
+│ ∀ i : dom tool_calls? •
+│   let decl = config.functions.find(tool_calls?(i).name)
+│   let output = execute_function(decl, tool_calls?(i).arguments)
+│   tool_results!(i) = ToolResult(tool_calls?(i), output)
+│
+│ /* Deduplicate identical calls */
+│ ∀ i, j : dom tool_results! • i ≠ j ⇒
+│   tool_results!(i).call ≠ tool_results!(j).call
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ExecuteFunction: Execute a single function
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ExecuteFunction
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ declaration? : FunctionDeclaration
+│ arguments? : JSON
+│ result! : JSON
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Arguments must match parameter schema */
+│ validate_json_schema(arguments?, declaration?.parameters)
+│
+│ /* Postconditions */
+│ /* Execute command with arguments */
+│ let command = declaration?.command
+│ let env = build_env(arguments?)
+│ let process = spawn(command, env, declaration?.timeout)
+│
+│ process.exit_code = 0 ⇒
+│   result! = parse_json(process.stdout)
+│
+│ process.exit_code ≠ 0 ⇒
+│   result! = json{"error": process.stderr}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ContinueWithToolResults: Continue chat with tool results
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ContinueWithToolResults
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ input? : Input
+│ tool_results? : seq ToolResult
+│ response! : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Tool results must be non-empty */
+│ #tool_results? > 0
+│
+│ /* Postconditions */
+│ /* Add assistant message with tool calls */
+│ let assistant_msg = Message(assistant, 
+│   toolCallsContent⟨MessageContentToolCalls(tool_results?, "", false)⟩)
+│
+│ /* Add tool result messages */
+│ let tool_msgs = map(tool_results?, 
+│   λ r : ToolResult • Message(tool, textContent⟨r.output⟩))
+│
+│ /* Merge with input to create new request */
+│ input'.tool_calls = MessageContentToolCalls(tool_results?, "", false)
+│
+│ /* Recursively call chat completion */
+│ /* This creates a loop until no more tool calls */
+│ CallChatCompletion[input'/input?, response!/response!]
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 5: Session Management Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * AddMessageToSession: Append message to active session
+ * Corresponds to Session::add_message in src/config/session.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ AddMessageToSession
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ message? : Message
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Session must be active */
+│ is_session_active(θSystemState)
+│
+│ /* Postconditions */
+│ /* Append message to session */
+│ config'.active_session.messages = 
+│   config.active_session.messages ++ ⟨message?⟩
+│
+│ /* Update token count */
+│ config'.active_session.tokens = 
+│   config.active_session.tokens + estimate_tokens(message?)
+│
+│ /* Mark session as dirty */
+│ config'.active_session.dirty = true
+│
+│ /* Check if compression needed */
+│ session_needs_compression(config'.active_session) ⇒
+│   CompressSession
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * CompressSession: Summarize old messages to save tokens
+ * Corresponds to Session::compress in src/config/session.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ CompressSession
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Session must be active and need compression */
+│ is_session_active(θSystemState)
+│ ∧ session_needs_compression(config.active_session)
+│
+│ /* Postconditions */
+│ /* Split messages into old and recent */
+│ let split_point = #config.active_session.messages ÷ 2
+│ let old_messages = config.active_session.messages(1..split_point)
+│ let recent_messages = 
+│   config.active_session.messages(split_point+1..#config.active_session.messages)
+│
+│ /* Generate summary of old messages */
+│ let summary_input = Input(SUMMARIZE_PROMPT, old_messages)
+│ CallChatCompletion[summary_input/input?, summary/response!]
+│
+│ /* Replace old messages with summary */
+│ let summary_message = Message(system, 
+│   textContent⟨SUMMARY_PROMPT ++ summary⟩)
+│
+│ config'.active_session.compressed_messages = 
+│   config.active_session.compressed_messages ++ ⟨summary_message⟩
+│
+│ config'.active_session.messages = recent_messages
+│
+│ /* Update token count */
+│ config'.active_session.tokens = 
+│   Σ{i : dom config'.active_session.messages • 
+│     estimate_tokens(config'.active_session.messages(i))} +
+│   Σ{i : dom config'.active_session.compressed_messages • 
+│     estimate_tokens(config'.active_session.compressed_messages(i))}
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 6: RAG Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * BuildRAG: Index documents for RAG
+ * Corresponds to Rag::init in src/rag/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ BuildRAG
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ name? : STRING
+│ document_paths? : seq FILEPATH
+│ rag! : Rag
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Name must be unique */
+│ name? ∉ dom rag_registry.rags
+│
+│ /* All document paths must exist */
+│ ∀ i : dom document_paths? • exists(document_paths?(i))
+│
+│ /* Postconditions */
+│ /* Load and chunk documents */
+│ let docs = map(document_paths?, load_document)
+│ let chunked_docs = map(docs, 
+│   λ d : Document • 
+│     chunk_document(d, config.rag_chunk_size, config.rag_chunk_overlap))
+│
+│ /* Generate embeddings for all chunks */
+│ let all_chunks = flatten(map(chunked_docs, λ d • d.chunks))
+│ let embeddings = generate_embeddings(all_chunks, 
+│                                      config.rag_embedding_model)
+│
+│ /* Build HNSW index */
+│ let hnsw = build_hnsw_index(embeddings)
+│
+│ /* Build BM25 index */
+│ let bm25 = build_bm25_index(all_chunks)
+│
+│ /* Create RAG data structure */
+│ rag!.name = name?
+│ rag!.embedding_model = config.rag_embedding_model
+│ rag!.data.documents = chunked_docs
+│ rag!.data.vectors = embeddings
+│ rag!.hnsw_built = true
+│ rag!.bm25_built = true
+│
+│ /* Add to registry */
+│ rag_registry'.rags = rag_registry.rags ⊕ {name? ↦ rag!}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * QueryRAG: Retrieve relevant context from RAG
+ * Corresponds to Rag::search in src/rag/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ QueryRAG
+├─────────────────────────────────────────────────────────────────
+│ ΞSystemState
+│ query? : STRING
+│ context! : STRING
+│ sources! : seq STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* RAG must be active and indexed */
+│ is_rag_active(θSystemState)
+│ ∧ config.active_rag.can_query = true
+│
+│ /* Postconditions */
+│ /* Generate query embedding */
+│ let query_embedding = generate_embeddings(⟨query?⟩, 
+│                                          config.active_rag.embedding_model)(1)
+│
+│ /* Vector similarity search (HNSW) */
+│ let vector_results = hnsw_search(
+│   config.active_rag.hnsw, 
+│   query_embedding, 
+│   config.active_rag.data.top_k * 2)
+│
+│ /* Keyword search (BM25) */
+│ let keyword_results = bm25_search(
+│   config.active_rag.bm25,
+│   query?,
+│   config.active_rag.data.top_k * 2)
+│
+│ /* Merge results (Reciprocal Rank Fusion) */
+│ let merged = merge_rrf(vector_results, keyword_results)
+│
+│ /* Rerank top results */
+│ let reranked = rerank(
+│   take(merged, config.active_rag.data.top_k * 2),
+│   query?,
+│   config.active_rag.data.reranker_model)
+│
+│ /* Take top-k after reranking */
+│ let final_results = take(reranked, config.active_rag.data.top_k)
+│
+│ /* Format context */
+│ context! = format_chunks(final_results)
+│ sources! = map(final_results, λ r • r.document_path)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 7: REPL Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ProcessREPLCommand: Execute REPL-specific command
+ * Corresponds to run_repl_command in src/repl/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ProcessREPLCommand
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ command? : REPLCommand
+│ output! : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Must be in REPL mode */
+│ config.working_mode = repl
+│ ∧ repl_state.active = true
+│
+│ /* Postconditions */
+│ command? = cmdModel⟨model_id⟩ ⇒
+│   SetModel[model_id/model_id?]
+│
+│ command? = cmdRole⟨role_name⟩ ⇒
+│   UseRole[role_name/role_name?]
+│
+│ command? = cmdSession⟨session_name⟩ ⇒
+│   StartSession[session_name/session_name?, false/create_new?]
+│
+│ command? = cmdAgent⟨agent_name⟩ ⇒ (
+│   config'.active_agent = load_agent(agent_name)
+│   ∧ UseRole[config'.active_agent.instructions/role_name?]
+│ )
+│
+│ command? = cmdInfo ⇒
+│   output! = format_info(config)
+│
+│ command? = cmdHelp ⇒
+│   output! = HELP_TEXT
+│
+│ command? = cmdClear ⇒ (
+│   repl_state'.history = ⟨⟩
+│   ∧ output! = "History cleared"
+│ )
+│
+│ command? = cmdExit ⇒ (
+│   repl_state'.active = false
+│   ∧ is_session_active(θSystemState) ⇒ EndSession[true/save?]
+│ )
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 8: Complete Workflow Operations
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ExecuteChatWorkflow: Complete chat interaction workflow
+ * Corresponds to start_directive in src/main.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ExecuteChatWorkflow
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ user_input? : STRING
+│ files? : seq FILEPATH
+│ final_output! : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Valid input */
+│ user_input? ≠ "" ∨ #files? > 0
+│
+│ /* Postconditions */
+│ /* 1. Create input */
+│ CreateInput[user_input?/text?, files?/files?, input/input!]
+│
+│ /* 2. Apply RAG if enabled */
+│ is_rag_active(θSystemState) ⇒
+│   UseEmbeddings[input/input, user_input?/query?]
+│
+│ /* 3. Prepare message sequence */
+│ PrepareChatRequest[input/input?, messages/messages!]
+│
+│ /* 4. Call LLM */
+│ config.stream = true ⇒
+│   CallChatCompletionStreaming[messages/messages?, 
+│                               complete_response/complete_response!,
+│                               tool_calls/tool_calls!]
+│
+│ config.stream = false ⇒
+│   CallChatCompletion[messages/messages?, 
+│                      response/response!,
+│                      tool_calls/tool_calls!]
+│
+│ /* 5. Handle tool calls if present */
+│ #tool_calls > 0 ⇒ (
+│   EvaluateToolCalls[tool_calls/tool_calls?, results/tool_results!]
+│   ∧ ContinueWithToolResults[input/input?, results/tool_results?, 
+│                              final_response/response!]
+│   ∧ final_output! = final_response
+│ )
+│
+│ #tool_calls = 0 ⇒
+│   final_output! = response
+│
+│ /* 6. Update session if active */
+│ is_session_active(θSystemState) ⇒ (
+│   AddMessageToSession[Message(user, textContent⟨user_input?⟩)/message?]
+│   ∧ AddMessageToSession[Message(assistant, 
+│                          textContent⟨final_output!⟩)/message?]
+│ )
+│
+│ /* 7. Save session if configured */
+│ is_session_active(θSystemState) ∧ config.save_session = true ⇒
+│   EndSession[true/save?]
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ExecuteAgentWorkflow: Complete agent interaction workflow
+ * Corresponds to Config::use_agent in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ExecuteAgentWorkflow
+├─────────────────────────────────────────────────────────────────
+│ ΔSystemState
+│ agent_name? : STRING
+│ user_input? : STRING
+│ final_output! : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Preconditions */
+│ /* Agent must exist */
+│ exists(config.agents_dir ++ "/" ++ agent_name? ++ ".yaml")
+│
+│ /* Postconditions */
+│ /* 1. Load agent configuration */
+│ let agent = load_agent(agent_name?)
+│ config'.active_agent = agent
+│
+│ /* 2. Setup agent role with instructions */
+│ UseRole[agent.instructions/role_name?]
+│
+│ /* 3. Load agent documents into RAG if specified */
+│ #agent.documents > 0 ⇒
+│   BuildRAG["temp"/name?, agent.documents/document_paths?, temp_rag/rag!]
+│   ∧ config'.active_rag = temp_rag
+│
+│ /* 4. Setup agent functions */
+│ ∀ func_name : agent.functions •
+│   func_name ∈ ran(map(config.functions.declarations, λ d • d.name))
+│
+│ /* 5. Start temporary session for agent */
+│ StartSession["temp"/session_name?, true/create_new?]
+│
+│ /* 6. Execute chat workflow with agent context */
+│ ExecuteChatWorkflow[user_input?/user_input?, ⟨⟩/files?, 
+│                     output/final_output!]
+│
+│ /* 7. Cleanup temporary resources */
+│ EndSession[false/save?]
+│ ∧ config'.active_agent.name = ""
+│ ∧ (#agent.documents > 0 ⇒ config'.active_rag.name = "")
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ END OF OPERATIONS SPECIFICATION
+─────────────────────────────────────────────────────────────────
