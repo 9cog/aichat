@@ -1,0 +1,514 @@
+/*
+ * AIChat System - System State Formal Specification (Z++)
+ * 
+ * This specification formalizes the overall system state and global
+ * invariants that must hold across all operating modes of AIChat.
+ *
+ * The specification models:
+ * - Global application state
+ * - Configuration state
+ * - Runtime state for each working mode (CMD, REPL, Serve)
+ * - Session management state
+ * - RAG system state
+ * - Function registry state
+ */
+
+─────────────────────────────────────────────────────────────────
+ IMPORTS
+─────────────────────────────────────────────────────────────────
+
+/* Import all data model definitions */
+IMPORT formal_spec_data_model
+
+─────────────────────────────────────────────────────────────────
+ SECTION 1: Configuration State
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ConfigState: Global configuration state
+ * Corresponds to Config struct in src/config/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ConfigState
+├─────────────────────────────────────────────────────────────────
+│ working_mode : WorkingMode
+│ model : Model
+│ clients : seq ClientConfig
+│ functions : Functions
+│ dry_run : BOOL
+│ stream : BOOL
+│ save_session : BOOL
+│ compress_threshold : TOKEN_COUNT
+│
+│ /* Model configuration */
+│ temperature : TEMPERATURE
+│ top_p : PROBABILITY
+│ 
+│ /* RAG configuration */
+│ rag_embedding_model : Model
+│ rag_reranker_model : Model
+│ rag_top_k : ℕ
+│ rag_chunk_size : ℕ
+│ rag_chunk_overlap : ℕ
+│
+│ /* Optional active components */
+│ active_role : Role
+│ active_session : Session
+│ active_agent : Agent
+│ active_rag : Rag
+│
+│ /* File system paths */
+│ config_dir : FILEPATH
+│ roles_dir : FILEPATH
+│ sessions_dir : FILEPATH
+│ rags_dir : FILEPATH
+│ functions_dir : FILEPATH
+│ agents_dir : FILEPATH
+│
+│ /* Logging */
+│ log_level : STRING
+│ log_path : FILEPATH
+├─────────────────────────────────────────────────────────────────
+│ /* Model must be from configured clients */
+│ ∃ i : dom clients • model.client_name = clients(i).name
+│
+│ /* Client names must be unique */
+│ ∀ i, j : dom clients • i ≠ j ⇒ clients(i).name ≠ clients(j).name
+│
+│ /* RAG models must be of appropriate types */
+│ rag_embedding_model.data.model_type = embedding
+│ rag_reranker_model.data.model_type = reranker
+│
+│ /* RAG parameters must be valid */
+│ 1 ≤ rag_top_k ≤ 100
+│ 100 ≤ rag_chunk_size ≤ 10000
+│ 0 ≤ rag_chunk_overlap < rag_chunk_size
+│
+│ /* Active session uses configured model if set */
+│ active_session.model = model
+│
+│ /* Active role consistent with session */
+│ active_session.role_name ≠ "" ⇒ 
+│   active_role.name = active_session.role_name
+│
+│ /* Active agent implies active role */
+│ active_agent.name ≠ "" ⇒ active_role.name ≠ ""
+│
+│ /* Active RAG must be from configured RAGs */
+│ active_rag.name ≠ "" ⇒ 
+│   exists(config_dir ++ "/rags/" ++ active_rag.name ++ ".yaml")
+│
+│ /* Directory paths must exist */
+│ exists(config_dir) ∧ exists(roles_dir) ∧ 
+│ exists(sessions_dir) ∧ exists(rags_dir) ∧
+│ exists(functions_dir) ∧ exists(agents_dir)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 2: REPL Mode State
+─────────────────────────────────────────────────────────────────
+
+/*
+ * REPLCommand: Commands available in REPL mode
+ */
+REPLCommand ::= 
+    cmdModel⟨⟨MODELID⟩⟩
+  | cmdRole⟨⟨STRING⟩⟩
+  | cmdSession⟨⟨STRING⟩⟩
+  | cmdAgent⟨⟨STRING⟩⟩
+  | cmdRag⟨⟨STRING⟩⟩
+  | cmdFile⟨⟨seq FILEPATH⟩⟩
+  | cmdSet⟨⟨STRING × STRING⟩⟩
+  | cmdInfo
+  | cmdHelp
+  | cmdClear
+  | cmdCopy
+  | cmdExit
+
+/*
+ * REPLHistoryEntry: Single entry in REPL history
+ */
+┌─────────────────────────────────────────────────────────────────
+│ REPLHistoryEntry
+├─────────────────────────────────────────────────────────────────
+│ timestamp : TIMESTAMP
+│ input : STRING
+│ output : STRING
+│ tokens_consumed : TOKEN_COUNT
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * REPLState: State specific to REPL mode
+ * Corresponds to Repl struct in src/repl/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ REPLState
+├─────────────────────────────────────────────────────────────────
+│ config : ConfigState
+│ history : seq REPLHistoryEntry
+│ multiline_buffer : STRING
+│ prompt_left : STRING
+│ prompt_right : STRING
+│ active : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* REPL only active in REPL working mode */
+│ active = true ⇒ config.working_mode = repl
+│
+│ /* History maintains chronological order */
+│ ∀ i, j : dom history • i < j ⇒ 
+│   history(i).timestamp < history(j).timestamp
+│
+│ /* Prompt templates are non-empty */
+│ prompt_left ≠ "" ∧ prompt_right ≠ ""
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 3: CMD Mode State
+─────────────────────────────────────────────────────────────────
+
+/*
+ * CMDState: State for command-line mode execution
+ */
+┌─────────────────────────────────────────────────────────────────
+│ CMDState
+├─────────────────────────────────────────────────────────────────
+│ config : ConfigState
+│ input : Input
+│ execute_shell : BOOL
+│ code_mode : BOOL
+│ output_generated : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* CMD mode only in CMD working mode */
+│ config.working_mode = cmd
+│
+│ /* Input must be non-empty */
+│ input.text ≠ "" ∨ #input.raw_files > 0
+│
+│ /* Shell execution and code mode are exclusive */
+│ execute_shell = true ⇒ code_mode = false
+│
+│ /* Shell execution requires specific role */
+│ execute_shell = true ⇒ 
+│   config.active_role.name = "shell"
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 4: Serve Mode State
+─────────────────────────────────────────────────────────────────
+
+/*
+ * RequestMethod: HTTP request methods
+ */
+RequestMethod ::= GET | POST | PUT | DELETE | OPTIONS
+
+/*
+ * HTTPRequest: Incoming HTTP request
+ */
+┌─────────────────────────────────────────────────────────────────
+│ HTTPRequest
+├─────────────────────────────────────────────────────────────────
+│ method : RequestMethod
+│ path : STRING
+│ headers : STRING ↦ STRING
+│ body : JSON
+│ remote_addr : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Path must start with / */
+│ #path > 0 ∧ path(1) = '/'
+│
+│ /* Content-Type header required for POST/PUT */
+│ method ∈ {POST, PUT} ⇒ "content-type" ∈ dom headers
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * HTTPResponse: Outgoing HTTP response
+ */
+┌─────────────────────────────────────────────────────────────────
+│ HTTPResponse
+├─────────────────────────────────────────────────────────────────
+│ status : ℕ
+│ headers : STRING ↦ STRING
+│ body : JSON
+│ streaming : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Status code must be valid HTTP status */
+│ 100 ≤ status ≤ 599
+│
+│ /* Streaming responses have specific content type */
+│ streaming = true ⇒ 
+│   headers("content-type") = "text/event-stream"
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ActiveRequest: Currently processing request
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ActiveRequest
+├─────────────────────────────────────────────────────────────────
+│ request : HTTPRequest
+│ model : Model
+│ start_time : TIMESTAMP
+│ abort_signal : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Model must be valid for the request endpoint */
+│ request.path = "/v1/chat/completions" ⇒ 
+│   model.data.model_type = chat
+│ request.path = "/v1/embeddings" ⇒ 
+│   model.data.model_type = embedding
+│ request.path = "/v1/rerank" ⇒ 
+│   model.data.model_type = reranker
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ServeState: State for HTTP server mode
+ * Corresponds to serve.rs implementation
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ServeState
+├─────────────────────────────────────────────────────────────────
+│ config : ConfigState
+│ bind_addr : STRING
+│ port : ℕ
+│ active_requests : seq ActiveRequest
+│ request_count : ℕ
+│ server_running : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Serve mode only in serve working mode */
+│ config.working_mode = serve
+│
+│ /* Port must be valid */
+│ 1024 ≤ port ≤ 65535
+│
+│ /* Request count monotonically increases */
+│ request_count ≥ #active_requests
+│
+│ /* Server must be running to handle requests */
+│ #active_requests > 0 ⇒ server_running = true
+│
+│ /* Each active request has unique start time */
+│ ∀ i, j : dom active_requests • i ≠ j ⇒ 
+│   active_requests(i).start_time ≠ active_requests(j).start_time
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 5: Session Registry
+─────────────────────────────────────────────────────────────────
+
+/*
+ * SessionRegistry: Registry of all available sessions
+ */
+┌─────────────────────────────────────────────────────────────────
+│ SessionRegistry
+├─────────────────────────────────────────────────────────────────
+│ sessions : STRING ↦ Session
+│ sessions_dir : FILEPATH
+├─────────────────────────────────────────────────────────────────
+│ /* Session names must be unique */
+│ ∀ name : dom sessions • 
+│   sessions(name).name = name
+│
+│ /* Each session corresponds to a file */
+│ ∀ name : dom sessions • 
+│   exists(sessions_dir ++ "/" ++ name ++ ".yaml")
+│
+│ /* Session files are valid YAML */
+│ ∀ name : dom sessions • 
+│   valid_yaml(read_file(sessions(name).path))
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 6: RAG Registry
+─────────────────────────────────────────────────────────────────
+
+/*
+ * RagRegistry: Registry of all available RAG databases
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RagRegistry
+├─────────────────────────────────────────────────────────────────
+│ rags : STRING ↦ Rag
+│ rags_dir : FILEPATH
+├─────────────────────────────────────────────────────────────────
+│ /* RAG names must be unique */
+│ ∀ name : dom rags • rags(name).name = name
+│
+│ /* Each RAG corresponds to a file */
+│ ∀ name : dom rags • 
+│   exists(rags_dir ++ "/" ++ name ++ ".yaml")
+│
+│ /* RAG databases are properly indexed */
+│ ∀ name : dom rags • 
+│   rags(name).hnsw_built ∧ rags(name).bm25_built
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 7: Complete System State
+─────────────────────────────────────────────────────────────────
+
+/*
+ * SystemState: Complete state of the AIChat system
+ * This is the top-level state schema that encompasses all components
+ */
+┌─────────────────────────────────────────────────────────────────
+│ SystemState
+├─────────────────────────────────────────────────────────────────
+│ config : ConfigState
+│ session_registry : SessionRegistry
+│ rag_registry : RagRegistry
+│ 
+│ /* Mode-specific states (only one active at a time) */
+│ repl_state : REPLState
+│ cmd_state : CMDState
+│ serve_state : ServeState
+├─────────────────────────────────────────────────────────────────
+│ /* GLOBAL INVARIANTS */
+│
+│ /* Only one working mode active at a time */
+│ (config.working_mode = repl ⇒ 
+│   repl_state.active ∧ ¬cmd_state.output_generated ∧ ¬serve_state.server_running) ∧
+│ (config.working_mode = cmd ⇒ 
+│   ¬repl_state.active ∧ ¬serve_state.server_running) ∧
+│ (config.working_mode = serve ⇒ 
+│   ¬repl_state.active ∧ ¬cmd_state.output_generated ∧ serve_state.server_running)
+│
+│ /* Active session must be in registry if not temporary */
+│ config.active_session.name ≠ "temp" ⇒ 
+│   config.active_session.name ∈ dom session_registry.sessions
+│
+│ /* Active RAG must be in registry */
+│ config.active_rag.name ≠ "" ⇒ 
+│   config.active_rag.name ∈ dom rag_registry.rags
+│
+│ /* Session registry directory matches config */
+│ session_registry.sessions_dir = config.sessions_dir
+│
+│ /* RAG registry directory matches config */
+│ rag_registry.rags_dir = config.rags_dir
+│
+│ /* All mode states share same config */
+│ repl_state.config = config ∧
+│ cmd_state.config = config ∧
+│ serve_state.config = config
+│
+│ /* Function registry is globally accessible */
+│ config.functions.declarations ≠ ∅ ⇒
+│   ∀ i : dom config.functions.declarations •
+│     exists(config.functions_dir ++ "/functions.json")
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * InitialSystemState: System state at initialization
+ */
+┌─────────────────────────────────────────────────────────────────
+│ InitialSystemState
+├─────────────────────────────────────────────────────────────────
+│ SystemState
+├─────────────────────────────────────────────────────────────────
+│ /* No active session initially */
+│ config.active_session.name = ""
+│
+│ /* No active RAG initially */
+│ config.active_rag.name = ""
+│
+│ /* No active agent initially */
+│ config.active_agent.name = ""
+│
+│ /* REPL state is inactive */
+│ repl_state.active = false
+│ repl_state.history = ⟨⟩
+│
+│ /* CMD state has not generated output */
+│ cmd_state.output_generated = false
+│
+│ /* Server is not running */
+│ serve_state.server_running = false
+│ serve_state.active_requests = ⟨⟩
+│ serve_state.request_count = 0
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 8: State Observation Functions
+─────────────────────────────────────────────────────────────────
+
+/*
+ * is_session_active: Check if a session is currently active
+ */
+is_session_active : SystemState → BOOL
+∀ state : SystemState • 
+  is_session_active(state) = (state.config.active_session.name ≠ "")
+
+/*
+ * is_rag_active: Check if RAG is currently active
+ */
+is_rag_active : SystemState → BOOL
+∀ state : SystemState • 
+  is_rag_active(state) = (state.config.active_rag.name ≠ "")
+
+/*
+ * is_agent_active: Check if an agent is currently active
+ */
+is_agent_active : SystemState → BOOL
+∀ state : SystemState • 
+  is_agent_active(state) = (state.config.active_agent.name ≠ "")
+
+/*
+ * get_active_model: Get the currently active model
+ */
+get_active_model : SystemState → Model
+∀ state : SystemState • 
+  get_active_model(state) = state.config.model
+
+/*
+ * get_session_token_count: Get token count for active session
+ */
+get_session_token_count : SystemState → TOKEN_COUNT
+∀ state : SystemState • 
+  is_session_active(state) ⇒
+    get_session_token_count(state) = state.config.active_session.tokens
+
+/*
+ * can_use_functions: Check if function calling is available
+ */
+can_use_functions : SystemState → BOOL
+∀ state : SystemState • 
+  can_use_functions(state) = 
+    (state.config.model.data.supports_function_calling ∧
+     #state.config.functions.declarations > 0)
+
+/*
+ * can_use_vision: Check if vision capabilities are available
+ */
+can_use_vision : SystemState → BOOL
+∀ state : SystemState • 
+  can_use_vision(state) = state.config.model.data.supports_vision
+
+─────────────────────────────────────────────────────────────────
+ SECTION 9: Auxiliary Predicates
+─────────────────────────────────────────────────────────────────
+
+/*
+ * valid_yaml: Check if string is valid YAML
+ */
+valid_yaml : STRING → BOOL
+
+/*
+ * within_token_limit: Check if message sequence is within model limits
+ */
+within_token_limit : (seq Message × Model) → BOOL
+∀ msgs : seq Message; model : Model •
+  within_token_limit(msgs, model) =
+    (Σ{i : dom msgs • estimate_tokens(msgs(i))} ≤ 
+     model.data.max_input_tokens)
+
+/*
+ * session_needs_compression: Check if session needs compression
+ */
+session_needs_compression : Session → BOOL
+∀ session : Session •
+  session_needs_compression(session) =
+    (session.tokens > session.compress_threshold ∧
+     session.compress_threshold > 0)
+
+─────────────────────────────────────────────────────────────────
+ END OF SYSTEM STATE SPECIFICATION
+─────────────────────────────────────────────────────────────────

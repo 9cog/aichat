@@ -1,0 +1,631 @@
+/*
+ * AIChat System - Data Layer Formal Specification (Z++)
+ * 
+ * This specification formalizes the core data structures and invariants
+ * of the AIChat system, focusing on the backend/core logic components.
+ *
+ * The specification models:
+ * - Message structures and conversation history
+ * - Model metadata and capabilities
+ * - Client configuration and provider details
+ * - Session state and persistence
+ * - Role definitions and prompts
+ * - Agent configuration and workflows
+ * - RAG (Retrieval-Augmented Generation) data structures
+ * - Function declarations and tool definitions
+ */
+
+─────────────────────────────────────────────────────────────────
+ SECTION 1: Basic Types and Constants
+─────────────────────────────────────────────────────────────────
+
+/*
+ * MessageRole: Enumeration of possible message roles in a conversation
+ * Corresponds to the MessageRole enum in src/client/message.rs
+ */
+MessageRole ::= system | assistant | user | tool
+
+/*
+ * ModelType: Classification of LLM model capabilities
+ * Corresponds to ModelType in src/client/model.rs
+ */
+ModelType ::= chat | embedding | reranker
+
+/*
+ * WorkingMode: Application execution mode
+ * Corresponds to WorkingMode in src/config/mod.rs
+ */
+WorkingMode ::= cmd | repl | serve
+
+/*
+ * Basic type definitions
+ */
+[STRING]        /* Sequence of characters */
+[URL]           /* Well-formed URL string */
+[FILEPATH]      /* Valid filesystem path */
+[APIKEY]        /* API authentication key */
+[MODELID]       /* Model identifier in format "client:model" */
+[HASH]          /* SHA-256 hash digest */
+[TIMESTAMP]     /* ISO 8601 timestamp */
+[JSON]          /* JSON value */
+
+/* Numeric constraints for model parameters */
+TOKEN_COUNT == ℕ
+PROBABILITY == { p : ℝ | 0.0 ≤ p ≤ 1.0 }
+TEMPERATURE == { t : ℝ | 0.0 ≤ t ≤ 2.0 }
+
+─────────────────────────────────────────────────────────────────
+ SECTION 2: Message and Content Structures
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ImageUrl: Represents an image URL in a message
+ */
+ImageUrl
+  url : URL
+┌─────────────────────────────────────────────────────────────────
+│ ImageUrl
+├─────────────────────────────────────────────────────────────────
+│ url : URL
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * MessageContentPart: Individual part of a multipart message
+ * Can be either text or an image URL
+ */
+MessageContentPart ::= text⟨⟨STRING⟩⟩ | imageUrl⟨⟨ImageUrl⟩⟩
+
+/*
+ * ToolCall: Represents a function/tool call from the LLM
+ * Corresponds to ToolCall in src/function.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ToolCall
+├─────────────────────────────────────────────────────────────────
+│ id : STRING
+│ name : STRING
+│ arguments : JSON
+├─────────────────────────────────────────────────────────────────
+│ /* Invariant: arguments must be valid JSON object */
+│ arguments ≠ ∅
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ToolResult: Result of executing a tool call
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ToolResult
+├─────────────────────────────────────────────────────────────────
+│ call : ToolCall
+│ output : JSON
+├─────────────────────────────────────────────────────────────────
+│ /* Output can be any valid JSON value */
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * MessageContentToolCalls: Collection of tool calls in a message
+ */
+┌─────────────────────────────────────────────────────────────────
+│ MessageContentToolCalls
+├─────────────────────────────────────────────────────────────────
+│ tool_results : seq ToolResult
+│ text : STRING
+│ sequence : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* If sequence is true, there are multiple tool call rounds */
+│ sequence = true ⇒ #tool_results > 0
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * MessageContent: Content of a message (text, multipart, or tool calls)
+ * Corresponds to MessageContent enum in src/client/message.rs
+ */
+MessageContent ::= 
+    textContent⟨⟨STRING⟩⟩ 
+  | arrayContent⟨⟨seq MessageContentPart⟩⟩
+  | toolCallsContent⟨⟨MessageContentToolCalls⟩⟩
+
+/*
+ * Message: A single message in a conversation
+ * Corresponds to Message struct in src/client/message.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Message
+├─────────────────────────────────────────────────────────────────
+│ role : MessageRole
+│ content : MessageContent
+├─────────────────────────────────────────────────────────────────
+│ /* System messages must have text content */
+│ role = system ⇒ 
+│   (∃ text : STRING • content = textContent⟨text⟩ ∨
+│    ∃ parts : seq MessageContentPart • content = arrayContent⟨parts⟩)
+│
+│ /* Tool messages require tool role */
+│ (∃ calls : MessageContentToolCalls • content = toolCallsContent⟨calls⟩) ⇒
+│   role = assistant
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 3: Model and Client Configuration
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ModelData: Metadata about an LLM model
+ * Corresponds to ModelData struct in src/client/model.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ModelData
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ real_name : STRING
+│ model_type : ModelType
+│ max_input_tokens : TOKEN_COUNT
+│ max_output_tokens : TOKEN_COUNT
+│ input_price : ℝ
+│ output_price : ℝ
+│ supports_vision : BOOL
+│ supports_function_calling : BOOL
+│ system_prompt_prefix : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Token limits must be positive */
+│ max_input_tokens > 0
+│ max_output_tokens > 0
+│
+│ /* Prices must be non-negative */
+│ input_price ≥ 0.0
+│ output_price ≥ 0.0
+│
+│ /* Vision and function calling only for chat models */
+│ (supports_vision = true ∨ supports_function_calling = true) ⇒ 
+│   model_type = chat
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * Model: A configured LLM model with client association
+ * Corresponds to Model struct in src/client/model.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Model
+├─────────────────────────────────────────────────────────────────
+│ client_name : STRING
+│ data : ModelData
+├─────────────────────────────────────────────────────────────────
+│ /* Client name must not be empty */
+│ client_name ≠ ""
+│
+│ /* Model ID format: "client:model_name" */
+│ id : MODELID
+│ id = client_name ++ ":" ++ data.name
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ClientType: Enumeration of supported LLM providers
+ */
+ClientType ::= openai | claude | gemini | bedrock | vertexai | 
+               azure_openai | cohere | openai_compatible
+
+/*
+ * ClientConfig: Configuration for an LLM provider client
+ * Corresponds to ClientConfig in src/client/common.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ClientConfig
+├─────────────────────────────────────────────────────────────────
+│ client_type : ClientType
+│ name : STRING
+│ api_key : APIKEY
+│ api_base : URL
+│ organization_id : STRING
+│ project_id : STRING
+│ models : seq ModelData
+├─────────────────────────────────────────────────────────────────
+│ /* API key required for most providers */
+│ client_type ∉ {openai_compatible} ⇒ api_key ≠ ""
+│
+│ /* API base URL must be valid */
+│ api_base ≠ ""
+│
+│ /* Model names must be unique within client */
+│ ∀ i, j : dom models • i ≠ j ⇒ 
+│   models(i).name ≠ models(j).name
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 4: Session Management
+─────────────────────────────────────────────────────────────────
+
+/*
+ * DataUrlMap: Mapping from URL placeholders to actual data URLs
+ * Used for resolving image URLs in message history
+ */
+DataUrlMap == STRING ↦ URL
+
+/*
+ * Session: Represents a conversation session with history
+ * Corresponds to Session struct in src/config/session.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Session
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ model_id : MODELID
+│ model : Model
+│ temperature : TEMPERATURE
+│ top_p : PROBABILITY
+│ use_tools : STRING
+│ save_session : BOOL
+│ compress_threshold : TOKEN_COUNT
+│ role_name : STRING
+│ role_prompt : STRING
+│ agent_instructions : STRING
+│ messages : seq Message
+│ compressed_messages : seq Message
+│ data_urls : DataUrlMap
+│ path : FILEPATH
+│ dirty : BOOL
+│ tokens : TOKEN_COUNT
+├─────────────────────────────────────────────────────────────────
+│ /* Model ID must match the configured model */
+│ model.id = model_id
+│
+│ /* Messages must maintain conversation order */
+│ /* System message, if present, must be first */
+│ (#messages > 0 ∧ messages(1).role = system) ⇒
+│   ∀ i : 2 .. #messages • messages(i).role ≠ system
+│
+│ /* Compressed messages are a prefix of full conversation */
+│ #compressed_messages ≤ #messages
+│
+│ /* Token count is sum of all message tokens */
+│ tokens = Σ{i : dom messages • estimate_tokens(messages(i))}
+│
+│ /* Session is dirty if it has unsaved changes */
+│ dirty = true ⇒ #messages > 0
+│
+│ /* Compression threshold must be positive if set */
+│ compress_threshold > 0
+│
+│ /* Temperature and top_p must be in valid ranges */
+│ 0.0 ≤ temperature ≤ 2.0
+│ 0.0 ≤ top_p ≤ 1.0
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 5: Roles and Agents
+─────────────────────────────────────────────────────────────────
+
+/*
+ * Role: A predefined prompt template and model configuration
+ * Corresponds to Role struct in src/config/role.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Role
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ prompt : STRING
+│ temperature : TEMPERATURE
+│ top_p : PROBABILITY
+│ model_id : MODELID
+├─────────────────────────────────────────────────────────────────
+│ /* Role name must be unique and not empty */
+│ name ≠ ""
+│
+│ /* Prompt can be empty (uses default) */
+│
+│ /* Temperature and top_p constraints */
+│ 0.0 ≤ temperature ≤ 2.0
+│ 0.0 ≤ top_p ≤ 1.0
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * AgentVariables: Key-value pairs for agent template variables
+ */
+AgentVariables == STRING ↦ STRING
+
+/*
+ * Agent: AI agent with instructions, tools, and documents
+ * Corresponds to Agent struct in src/config/agent.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Agent
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ instructions : STRING
+│ functions : seq STRING
+│ documents : seq FILEPATH
+│ variables : AgentVariables
+│ model_id : MODELID
+│ temperature : TEMPERATURE
+│ top_p : PROBABILITY
+├─────────────────────────────────────────────────────────────────
+│ /* Agent name must be unique */
+│ name ≠ ""
+│
+│ /* Instructions define agent behavior */
+│ instructions ≠ ""
+│
+│ /* Function names must be unique within agent */
+│ ∀ i, j : dom functions • i ≠ j ⇒ functions(i) ≠ functions(j)
+│
+│ /* Document paths must exist and be readable */
+│ ∀ i : dom documents • exists(documents(i))
+│
+│ /* Variables must have non-empty keys */
+│ ∀ k : dom variables • k ≠ ""
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 6: Function Calling
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ParameterType: JSON Schema type for function parameters
+ */
+ParameterType ::= string | number | boolean | object | array | null
+
+/*
+ * FunctionParameter: A parameter definition for a function
+ */
+┌─────────────────────────────────────────────────────────────────
+│ FunctionParameter
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ param_type : ParameterType
+│ description : STRING
+│ required : BOOL
+│ enum_values : seq STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Parameter name must not be empty */
+│ name ≠ ""
+│
+│ /* Enum values only for string or number types */
+│ #enum_values > 0 ⇒ param_type ∈ {string, number}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * FunctionDeclaration: Declaration of a callable function/tool
+ * Corresponds to FunctionDeclaration in src/function.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ FunctionDeclaration
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ description : STRING
+│ parameters : seq FunctionParameter
+│ command : STRING
+│ timeout : ℕ
+├─────────────────────────────────────────────────────────────────
+│ /* Function name must be unique globally */
+│ name ≠ ""
+│
+│ /* Description helps LLM decide when to call function */
+│ description ≠ ""
+│
+│ /* Command specifies how to execute the function */
+│ command ≠ ""
+│
+│ /* Timeout must be positive (in seconds) */
+│ timeout > 0
+│
+│ /* Parameter names must be unique within function */
+│ ∀ i, j : dom parameters • i ≠ j ⇒ 
+│   parameters(i).name ≠ parameters(j).name
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * Functions: Registry of available functions
+ * Corresponds to Functions struct in src/function.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Functions
+├─────────────────────────────────────────────────────────────────
+│ declarations : seq FunctionDeclaration
+├─────────────────────────────────────────────────────────────────
+│ /* Function names must be globally unique */
+│ ∀ i, j : dom declarations • i ≠ j ⇒ 
+│   declarations(i).name ≠ declarations(j).name
+│
+│ /* Function lookup operation */
+│ find : STRING ⇸ FunctionDeclaration
+│ ∀ name : STRING • 
+│   find(name) = (μ decl : declarations • decl.name = name)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 7: RAG (Retrieval-Augmented Generation)
+─────────────────────────────────────────────────────────────────
+
+/*
+ * Vector: Embedding vector representation
+ */
+Vector == seq ℝ
+
+/*
+ * ChunkData: A text chunk from a document
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChunkData
+├─────────────────────────────────────────────────────────────────
+│ id : ℕ
+│ text : STRING
+│ start_char : ℕ
+│ end_char : ℕ
+├─────────────────────────────────────────────────────────────────
+│ /* Chunk boundaries must be valid */
+│ start_char < end_char
+│
+│ /* Text length matches character range */
+│ end_char - start_char = #text
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * DocumentData: Metadata and chunks for a processed document
+ */
+┌─────────────────────────────────────────────────────────────────
+│ DocumentData
+├─────────────────────────────────────────────────────────────────
+│ id : ℕ
+│ path : FILEPATH
+│ hash : HASH
+│ chunks : seq ChunkData
+├─────────────────────────────────────────────────────────────────
+│ /* Document must have at least one chunk */
+│ #chunks > 0
+│
+│ /* Chunk IDs must be sequential */
+│ ∀ i : dom chunks • chunks(i).id = i - 1
+│
+│ /* Hash is SHA-256 of original file content */
+│ hash = sha256(read_file(path))
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RagData: Complete RAG database state
+ * Corresponds to RagData in src/rag/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RagData
+├─────────────────────────────────────────────────────────────────
+│ embedding_model : MODELID
+│ chunk_size : ℕ
+│ chunk_overlap : ℕ
+│ reranker_model : MODELID
+│ top_k : ℕ
+│ document_paths : seq FILEPATH
+│ documents : seq DocumentData
+│ vectors : seq Vector
+├─────────────────────────────────────────────────────────────────
+│ /* Chunk parameters must be reasonable */
+│ 100 ≤ chunk_size ≤ 10000
+│ 0 ≤ chunk_overlap < chunk_size
+│
+│ /* Top-k must be positive and reasonable */
+│ 1 ≤ top_k ≤ 100
+│
+│ /* Documents correspond to document paths */
+│ #documents = #document_paths
+│ ∀ i : dom documents • documents(i).path ∈ ran document_paths
+│
+│ /* One embedding vector per chunk across all documents */
+│ #vectors = Σ{i : dom documents • #documents(i).chunks}
+│
+│ /* All vectors have same dimensionality */
+│ ∀ i, j : dom vectors • #vectors(i) = #vectors(j)
+│
+│ /* Vector dimensionality depends on embedding model */
+│ #vectors(1) ∈ {384, 512, 768, 1024, 1536, 3072}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * Rag: Complete RAG system with indices
+ * Corresponds to Rag struct in src/rag/mod.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Rag
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ path : FILEPATH
+│ embedding_model : Model
+│ data : RagData
+│ hnsw_built : BOOL
+│ bm25_built : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* RAG name must be unique */
+│ name ≠ ""
+│
+│ /* Embedding model must match data */
+│ embedding_model.id = data.embedding_model
+│
+│ /* Embedding model must be of type embedding */
+│ embedding_model.data.model_type = embedding
+│
+│ /* Indices must be built before querying */
+│ /* HNSW index for vector similarity search */
+│ /* BM25 index for keyword search */
+│
+│ /* Both indices required for hybrid retrieval */
+│ can_query : BOOL
+│ can_query = hnsw_built ∧ bm25_built
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 8: Input Processing
+─────────────────────────────────────────────────────────────────
+
+/*
+ * Input: Processed user input with context and metadata
+ * Corresponds to Input struct in src/config/input.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ Input
+├─────────────────────────────────────────────────────────────────
+│ text : STRING
+│ raw_text : STRING
+│ raw_files : seq STRING
+│ patched_text : STRING
+│ last_reply : STRING
+│ continue_output : STRING
+│ regenerate : BOOL
+│ medias : seq URL
+│ data_urls : DataUrlMap
+│ tool_calls : MessageContentToolCalls
+│ role : Role
+│ rag_name : STRING
+│ with_session : BOOL
+│ with_agent : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Input must have either text or files */
+│ text ≠ "" ∨ #raw_files > 0 ∨ #medias > 0
+│
+│ /* Patched text is text with role prompt applied */
+│ patched_text ≠ "" ⇒ text ≠ ""
+│
+│ /* Continue and regenerate are mutually exclusive */
+│ continue_output ≠ "" ⇒ regenerate = false
+│ regenerate = true ⇒ continue_output = ""
+│
+│ /* Last reply only valid in session context */
+│ last_reply ≠ "" ⇒ with_session = true
+│
+│ /* RAG name specified only if RAG is enabled */
+│ rag_name ≠ "" ⇒ ∃ rag : Rag • rag.name = rag_name
+│
+│ /* Agent mode implies specific role and settings */
+│ with_agent = true ⇒ role.name ≠ ""
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 9: Auxiliary Functions
+─────────────────────────────────────────────────────────────────
+
+/*
+ * estimate_tokens: Estimate token count for a message
+ * Uses simple heuristic: ~4 characters per token
+ */
+estimate_tokens : Message → TOKEN_COUNT
+∀ msg : Message • 
+  estimate_tokens(msg) = (#(msg.content.text) ÷ 4) + PER_MESSAGES_TOKENS
+
+/*
+ * sha256: Compute SHA-256 hash of content
+ */
+sha256 : STRING → HASH
+
+/*
+ * read_file: Read file content from filesystem
+ */
+read_file : FILEPATH ⇸ STRING
+
+/*
+ * exists: Check if file path exists
+ */
+exists : FILEPATH → BOOL
+
+/*
+ * validate_json_schema: Validate JSON against schema
+ */
+validate_json_schema : (JSON × JSON) → BOOL
+
+─────────────────────────────────────────────────────────────────
+ END OF DATA MODEL SPECIFICATION
+─────────────────────────────────────────────────────────────────
