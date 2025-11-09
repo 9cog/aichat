@@ -1,0 +1,887 @@
+/*
+ * AIChat System - External Integration Contracts Specification (Z++)
+ * 
+ * This specification formalizes the contracts and interfaces for external
+ * integrations including LLM provider APIs, HTTP server endpoints, function
+ * calling protocols, and RAG retrieval interfaces.
+ *
+ * The specification models:
+ * - LLM provider API contracts (OpenAI, Claude, Gemini, etc.)
+ * - HTTP server endpoint specifications
+ * - Function calling protocols (including MCP)
+ * - Document loader interfaces
+ * - Embedding and reranking API contracts
+ */
+
+─────────────────────────────────────────────────────────────────
+ IMPORTS
+─────────────────────────────────────────────────────────────────
+
+IMPORT formal_spec_data_model
+IMPORT formal_spec_system_state
+IMPORT formal_spec_operations
+
+─────────────────────────────────────────────────────────────────
+ SECTION 1: LLM Provider API Contracts
+─────────────────────────────────────────────────────────────────
+
+/*
+ * HTTPStatus: HTTP status codes
+ */
+HTTPStatus == { s : ℕ | 100 ≤ s ≤ 599 }
+
+/*
+ * ChatCompletionRequest: Standard request format for chat completions
+ * Based on OpenAI API format (de facto standard)
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChatCompletionRequest
+├─────────────────────────────────────────────────────────────────
+│ model : STRING
+│ messages : seq Message
+│ temperature : TEMPERATURE
+│ top_p : PROBABILITY
+│ max_tokens : TOKEN_COUNT
+│ stream : BOOL
+│ tools : seq FunctionDeclaration
+│ tool_choice : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Model identifier must not be empty */
+│ model ≠ ""
+│
+│ /* Messages must be non-empty */
+│ #messages > 0
+│
+│ /* Temperature and top_p must be in valid ranges */
+│ 0.0 ≤ temperature ≤ 2.0
+│ 0.0 ≤ top_p ≤ 1.0
+│
+│ /* Max tokens must be positive */
+│ max_tokens > 0
+│
+│ /* Tool choice must be valid if tools present */
+│ #tools > 0 ∧ tool_choice ≠ "" ⇒
+│   tool_choice ∈ {"none", "auto", "required"}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ChatCompletionChoice: Single completion choice in response
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChatCompletionChoice
+├─────────────────────────────────────────────────────────────────
+│ index : ℕ
+│ message : Message
+│ finish_reason : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Index must be non-negative */
+│ index ≥ 0
+│
+│ /* Finish reason must be valid */
+│ finish_reason ∈ {"stop", "length", "tool_calls", "content_filter", "null"}
+│
+│ /* Message must be assistant role */
+│ message.role = assistant
+│
+│ /* If finish reason is tool_calls, message must have tool calls */
+│ finish_reason = "tool_calls" ⇒
+│   ∃ calls : MessageContentToolCalls • 
+│     message.content = toolCallsContent⟨calls⟩
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ChatCompletionUsage: Token usage statistics
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChatCompletionUsage
+├─────────────────────────────────────────────────────────────────
+│ prompt_tokens : TOKEN_COUNT
+│ completion_tokens : TOKEN_COUNT
+│ total_tokens : TOKEN_COUNT
+├─────────────────────────────────────────────────────────────────
+│ /* Total must equal sum of prompt and completion */
+│ total_tokens = prompt_tokens + completion_tokens
+│
+│ /* All counts must be non-negative */
+│ prompt_tokens ≥ 0
+│ completion_tokens ≥ 0
+│ total_tokens ≥ 0
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ChatCompletionResponse: Standard response format
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChatCompletionResponse
+├─────────────────────────────────────────────────────────────────
+│ id : STRING
+│ object : STRING
+│ created : TIMESTAMP
+│ model : STRING
+│ choices : seq ChatCompletionChoice
+│ usage : ChatCompletionUsage
+├─────────────────────────────────────────────────────────────────
+│ /* Response ID must be unique */
+│ id ≠ ""
+│
+│ /* Object type must be chat.completion */
+│ object = "chat.completion"
+│
+│ /* Must have at least one choice */
+│ #choices > 0
+│
+│ /* Choices must be sequentially indexed */
+│ ∀ i : dom choices • choices(i).index = i - 1
+│
+│ /* Model matches request */
+│ model ≠ ""
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * StreamChunk: Single chunk in streaming response
+ */
+┌─────────────────────────────────────────────────────────────────
+│ StreamChunk
+├─────────────────────────────────────────────────────────────────
+│ id : STRING
+│ object : STRING
+│ created : TIMESTAMP
+│ model : STRING
+│ choices : seq ChatCompletionChoice
+│ delta : MessageContent
+├─────────────────────────────────────────────────────────────────
+│ /* Object type for streaming */
+│ object = "chat.completion.chunk"
+│
+│ /* Delta contains incremental content */
+│ /* Delta may be empty for first/last chunks */
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * LLMProviderContract: Contract for LLM provider implementation
+ * Corresponds to Client trait in src/client/common.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ LLMProviderContract
+├─────────────────────────────────────────────────────────────────
+│ /* Provider identification */
+│ provider_name : STRING
+│ api_base_url : URL
+│ api_version : STRING
+│
+│ /* Authentication */
+│ authenticate : APIKEY → HTTPHeaders
+│
+│ /* Request building */
+│ build_chat_request : ChatCompletionRequest → JSON
+│
+│ /* Response parsing */
+│ parse_chat_response : JSON → ChatCompletionResponse
+│ parse_stream_chunk : STRING → StreamChunk
+│
+│ /* API endpoints */
+│ chat_completions_endpoint : URL
+│ embeddings_endpoint : URL
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Provider name must be unique */
+│ provider_name ≠ ""
+│
+│ /* API base URL must be valid HTTPS */
+│ api_base_url starts_with "https://"
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Authentication adds Authorization header */
+│ ∀ key : APIKEY • 
+│   "authorization" ∈ dom authenticate(key)
+│
+│ /* Chat endpoint is under base URL */
+│ chat_completions_endpoint starts_with api_base_url
+│
+│ /* Request building preserves message content */
+│ ∀ req : ChatCompletionRequest •
+│   let json = build_chat_request(req)
+│   json.model = req.model ∧
+│   #json.messages = #req.messages
+│
+│ /* Response parsing is inverse of generation */
+│ ∀ resp : ChatCompletionResponse •
+│   let json = serialize(resp)
+│   parse_chat_response(json) = resp
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * ProviderSpecificAdaptation: Provider-specific behavior
+ * Different providers may have different message formats
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ProviderSpecificAdaptation
+├─────────────────────────────────────────────────────────────────
+│ provider : LLMProviderContract
+│ 
+│ /* Message adaptation */
+│ adapt_messages : seq Message → JSON
+│
+│ /* Tool call format adaptation */
+│ adapt_tool_calls : seq ToolCall → JSON
+│ extract_tool_calls : JSON → seq ToolCall
+│
+│ /* Streaming format */
+│ supports_sse : BOOL
+│ event_delimiter : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* OpenAI format (standard) */
+│ provider.provider_name = "openai" ⇒ (
+│   supports_sse = true
+│   ∧ event_delimiter = "data: "
+│ )
+│
+│ /* Claude format (Anthropic) */
+│ provider.provider_name = "claude" ⇒ (
+│   supports_sse = true
+│   ∧ event_delimiter = "data: "
+│   /* Claude requires system message separation */
+│ )
+│
+│ /* Gemini format (Google) */
+│ provider.provider_name = "gemini" ⇒ (
+│   supports_sse = true
+│   /* Gemini uses different role names */
+│   ∧ adapt_messages(⟨Message(user, c)⟩) = 
+│       [{"role": "user", "parts": [{"text": c}]}]
+│ )
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 2: HTTP Server Endpoint Specifications
+─────────────────────────────────────────────────────────────────
+
+/*
+ * ChatCompletionsEndpoint: /v1/chat/completions endpoint
+ * Corresponds to handler in src/serve.rs
+ */
+┌─────────────────────────────────────────────────────────────────
+│ ChatCompletionsEndpoint
+├─────────────────────────────────────────────────────────────────
+│ path : STRING
+│ method : RequestMethod
+│
+│ /* Request handler */
+│ handle : (HTTPRequest × SystemState) → HTTPResponse
+├─────────────────────────────────────────────────────────────────
+│ /* Endpoint configuration */
+│ path = "/v1/chat/completions"
+│ method = POST
+│
+│ /* PRECONDITIONS for requests */
+│ ∀ req : HTTPRequest • 
+│   handle is defined for req ⇒ (
+│     /* Content type must be JSON */
+│     req.headers("content-type") = "application/json"
+│     
+│     /* Body must be valid ChatCompletionRequest */
+│     ∧ ∃ ccr : ChatCompletionRequest • 
+│         req.body = serialize(ccr)
+│     
+│     /* Model must be configured */
+│     ∧ ∃ model_id : MODELID • 
+│         req.body.model = model_id
+│   )
+│
+│ /* POSTCONDITIONS for responses */
+│ ∀ req : HTTPRequest; state : SystemState •
+│   let resp = handle(req, state)
+│   
+│   /* Success response (200) */
+│   resp.status = 200 ⇒ (
+│     /* Non-streaming: return complete response */
+│     req.body.stream = false ⇒
+│       ∃ ccr : ChatCompletionResponse • 
+│         resp.body = serialize(ccr)
+│     
+│     /* Streaming: SSE format */
+│     ∧ req.body.stream = true ⇒
+│       resp.headers("content-type") = "text/event-stream"
+│       ∧ resp.streaming = true
+│   )
+│   
+│   /* Error response (4xx or 5xx) */
+│   ∧ resp.status ≥ 400 ⇒
+│     ∃ error_msg : STRING • 
+│       resp.body = {"error": {"message": error_msg}}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * EmbeddingsEndpoint: /v1/embeddings endpoint
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EmbeddingsEndpoint
+├─────────────────────────────────────────────────────────────────
+│ path : STRING
+│ method : RequestMethod
+│ handle : (HTTPRequest × SystemState) → HTTPResponse
+├─────────────────────────────────────────────────────────────────
+│ path = "/v1/embeddings"
+│ method = POST
+│
+│ /* PRECONDITIONS */
+│ ∀ req : HTTPRequest • 
+│   handle is defined for req ⇒ (
+│     req.headers("content-type") = "application/json"
+│     ∧ req.body.input ≠ null
+│     ∧ req.body.model ≠ null
+│   )
+│
+│ /* POSTCONDITIONS */
+│ ∀ req : HTTPRequest; state : SystemState •
+│   let resp = handle(req, state)
+│   resp.status = 200 ⇒ (
+│     ∃ embeddings : seq Vector •
+│       resp.body.data = embeddings
+│       ∧ #embeddings = #req.body.input
+│       ∧ ∀ i : dom embeddings • 
+│           #embeddings(i) = state.config.rag_embedding_model.data.embedding_dim
+│   )
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RerankEndpoint: /v1/rerank endpoint
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RerankEndpoint
+├─────────────────────────────────────────────────────────────────
+│ path : STRING
+│ method : RequestMethod
+│ handle : (HTTPRequest × SystemState) → HTTPResponse
+├─────────────────────────────────────────────────────────────────
+│ path = "/v1/rerank"
+│ method = POST
+│
+│ /* PRECONDITIONS */
+│ ∀ req : HTTPRequest • 
+│   handle is defined for req ⇒ (
+│     req.body.query ≠ null
+│     ∧ req.body.documents ≠ null
+│     ∧ #req.body.documents > 0
+│   )
+│
+│ /* POSTCONDITIONS */
+│ ∀ req : HTTPRequest; state : SystemState •
+│   let resp = handle(req, state)
+│   resp.status = 200 ⇒ (
+│     ∃ scores : seq ℝ •
+│       resp.body.results = scores
+│       ∧ #scores = #req.body.documents
+│       ∧ ∀ i : dom scores • 0.0 ≤ scores(i) ≤ 1.0
+│       /* Scores are in descending order */
+│       ∧ ∀ i, j : dom scores • i < j ⇒ scores(i) ≥ scores(j)
+│   )
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * PlaygroundEndpoint: /playground static page
+ */
+┌─────────────────────────────────────────────────────────────────
+│ PlaygroundEndpoint
+├─────────────────────────────────────────────────────────────────
+│ path : STRING
+│ method : RequestMethod
+│ handle : (HTTPRequest × SystemState) → HTTPResponse
+├─────────────────────────────────────────────────────────────────
+│ path = "/playground"
+│ method = GET
+│
+│ /* POSTCONDITIONS */
+│ ∀ req : HTTPRequest; state : SystemState •
+│   let resp = handle(req, state)
+│   resp.status = 200 ⇒ (
+│     resp.headers("content-type") = "text/html"
+│     ∧ resp.body = PLAYGROUND_HTML
+│   )
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 3: Function Calling Protocol (MCP)
+─────────────────────────────────────────────────────────────────
+
+/*
+ * MCPMessage: Message format for Model Context Protocol
+ */
+MCPMessageType ::= request | response | notification | error
+
+┌─────────────────────────────────────────────────────────────────
+│ MCPMessage
+├─────────────────────────────────────────────────────────────────
+│ jsonrpc : STRING
+│ id : STRING
+│ msg_type : MCPMessageType
+│ method : STRING
+│ params : JSON
+│ result : JSON
+│ error : JSON
+├─────────────────────────────────────────────────────────────────
+│ /* JSON-RPC 2.0 version */
+│ jsonrpc = "2.0"
+│
+│ /* Request must have method and params */
+│ msg_type = request ⇒ (
+│   method ≠ "" ∧ params ≠ null
+│ )
+│
+│ /* Response must have result or error */
+│ msg_type = response ⇒ (
+│   (result ≠ null ∧ error = null) ∨
+│   (result = null ∧ error ≠ null)
+│ )
+│
+│ /* Notification has no id */
+│ msg_type = notification ⇒ id = null
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * MCPToolDefinition: Tool definition in MCP format
+ */
+┌─────────────────────────────────────────────────────────────────
+│ MCPToolDefinition
+├─────────────────────────────────────────────────────────────────
+│ name : STRING
+│ description : STRING
+│ inputSchema : JSON
+├─────────────────────────────────────────────────────────────────
+│ /* Name must be valid identifier */
+│ name ≠ "" ∧ is_valid_identifier(name)
+│
+│ /* Description helps LLM understand tool */
+│ description ≠ ""
+│
+│ /* Input schema must be valid JSON Schema */
+│ inputSchema.type = "object"
+│ ∧ inputSchema.properties ≠ null
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * MCPClient: Client for communicating with MCP server
+ */
+┌─────────────────────────────────────────────────────────────────
+│ MCPClient
+├─────────────────────────────────────────────────────────────────
+│ server_command : STRING
+│ server_args : seq STRING
+│ stdin_pipe : Pipe
+│ stdout_pipe : Pipe
+│ process : Process
+│
+│ /* Operations */
+│ send : MCPMessage → ()
+│ receive : () → MCPMessage
+│ list_tools : () → seq MCPToolDefinition
+│ call_tool : (STRING × JSON) → JSON
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Server command must be executable */
+│ exists(server_command) ∧ is_executable(server_command)
+│
+│ /* Process must be running */
+│ process.is_alive()
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Send operation writes to stdin */
+│ ∀ msg : MCPMessage •
+│   send(msg) ⇒ stdin_pipe.write(serialize_json(msg))
+│
+│ /* Receive operation reads from stdout */
+│ ∀ msg : MCPMessage •
+│   receive() = msg ⇒ stdout_pipe.read() = serialize_json(msg)
+│
+│ /* List tools queries available tools */
+│ list_tools() = tools ⇒ (
+│   send(MCPMessage(request, "tools/list", {}))
+│   ∧ receive() = MCPMessage(response, null, tools)
+│ )
+│
+│ /* Call tool executes tool with parameters */
+│ ∀ name : STRING; params : JSON; result : JSON •
+│   call_tool(name, params) = result ⇒ (
+│     send(MCPMessage(request, "tools/call", 
+│                     {"name": name, "arguments": params}))
+│     ∧ receive() = MCPMessage(response, null, {"content": result})
+│   )
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * FunctionExecutionContract: Contract for function execution
+ */
+┌─────────────────────────────────────────────────────────────────
+│ FunctionExecutionContract
+├─────────────────────────────────────────────────────────────────
+│ declaration : FunctionDeclaration
+│ executor : (JSON × Environment) → JSON
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Arguments must match parameter schema */
+│ ∀ args : JSON •
+│   executor is defined for args ⇒
+│     validate_json_schema(args, declaration.parameters)
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Execution respects timeout */
+│ ∀ args : JSON; env : Environment; start : TIMESTAMP •
+│   let result = executor(args, env)
+│   let end = current_timestamp()
+│   (end - start) ≤ declaration.timeout
+│
+│ /* Result is valid JSON */
+│ ∀ args : JSON; env : Environment •
+│   let result = executor(args, env)
+│   is_valid_json(result)
+│
+│ /* Errors are returned as JSON objects */
+│ ∀ args : JSON; env : Environment •
+│   executor(args, env) fails ⇒
+│     ∃ error_msg : STRING •
+│       result = {"error": error_msg}
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 4: Document Loader Interfaces
+─────────────────────────────────────────────────────────────────
+
+/*
+ * DocumentType: Supported document formats
+ */
+DocumentType ::= plaintext | markdown | pdf | html | code | image
+
+/*
+ * DocumentLoaderContract: Contract for loading documents
+ */
+┌─────────────────────────────────────────────────────────────────
+│ DocumentLoaderContract
+├─────────────────────────────────────────────────────────────────
+│ supported_extensions : seq STRING
+│ doc_type : DocumentType
+│
+│ /* Loading operations */
+│ can_load : FILEPATH → BOOL
+│ load : FILEPATH → STRING
+│ extract_metadata : FILEPATH → JSON
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* File must exist and be readable */
+│ ∀ path : FILEPATH •
+│   can_load(path) ⇒ exists(path) ∧ is_readable(path)
+│
+│ /* Extension must be supported */
+│ ∀ path : FILEPATH •
+│   can_load(path) ⇒ 
+│     ∃ ext : supported_extensions • 
+│       path ends_with ("." ++ ext)
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Load returns text content */
+│ ∀ path : FILEPATH •
+│   can_load(path) ⇒
+│     let content = load(path)
+│     content ≠ "" ∧ is_valid_utf8(content)
+│
+│ /* Metadata includes basic file info */
+│ ∀ path : FILEPATH •
+│   can_load(path) ⇒
+│     let meta = extract_metadata(path)
+│     "path" ∈ dom meta ∧
+│     "size" ∈ dom meta ∧
+│     "modified" ∈ dom meta
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * TextSplitterContract: Contract for splitting text into chunks
+ */
+┌─────────────────────────────────────────────────────────────────
+│ TextSplitterContract
+├─────────────────────────────────────────────────────────────────
+│ chunk_size : ℕ
+│ chunk_overlap : ℕ
+│ separator : STRING
+│
+│ /* Splitting operation */
+│ split : STRING → seq ChunkData
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Chunk parameters must be valid */
+│ 100 ≤ chunk_size ≤ 10000
+│ 0 ≤ chunk_overlap < chunk_size
+│
+│ /* POSTCONDITIONS */
+│
+│ /* All chunks respect size limit */
+│ ∀ text : STRING •
+│   let chunks = split(text)
+│   ∀ i : dom chunks • #chunks(i).text ≤ chunk_size
+│
+│ /* Chunks have correct boundaries */
+│ ∀ text : STRING •
+│   let chunks = split(text)
+│   ∀ i : dom chunks •
+│     chunks(i).start_char < chunks(i).end_char
+│     ∧ chunks(i).end_char - chunks(i).start_char = #chunks(i).text
+│
+│ /* Chunks overlap correctly */
+│ ∀ text : STRING •
+│   let chunks = split(text)
+│   ∀ i : 1..(#chunks - 1) •
+│     chunks(i+1).start_char ≤ chunks(i).end_char
+│     ∧ (chunks(i).end_char - chunks(i+1).start_char) ≤ chunk_overlap
+│
+│ /* Complete text is covered */
+│ ∀ text : STRING •
+│   let chunks = split(text)
+│   #chunks > 0 ⇒
+│     chunks(1).start_char = 0 ∧
+│     chunks(#chunks).end_char = #text
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 5: Embedding and Reranking Contracts
+─────────────────────────────────────────────────────────────────
+
+/*
+ * EmbeddingRequest: Request for generating embeddings
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EmbeddingRequest
+├─────────────────────────────────────────────────────────────────
+│ model : STRING
+│ input : seq STRING
+│ dimensions : ℕ
+├─────────────────────────────────────────────────────────────────
+│ /* Model must be specified */
+│ model ≠ ""
+│
+│ /* Input must be non-empty */
+│ #input > 0
+│
+│ /* Dimensions must be valid */
+│ dimensions ∈ {384, 512, 768, 1024, 1536, 3072}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * EmbeddingResponse: Response with embeddings
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EmbeddingResponse
+├─────────────────────────────────────────────────────────────────
+│ model : STRING
+│ data : seq Vector
+│ usage : ChatCompletionUsage
+├─────────────────────────────────────────────────────────────────
+│ /* Number of embeddings matches input */
+│ /* Handled by request/response pairing */
+│
+│ /* All embeddings have same dimensionality */
+│ ∀ i, j : dom data • #data(i) = #data(j)
+│
+│ /* Embeddings are normalized (optional) */
+│ ∀ i : dom data •
+│   let magnitude = sqrt(Σ{j : dom data(i) • data(i)(j)² })
+│   0.99 ≤ magnitude ≤ 1.01
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * EmbeddingAPIContract: Contract for embedding API
+ */
+┌─────────────────────────────────────────────────────────────────
+│ EmbeddingAPIContract
+├─────────────────────────────────────────────────────────────────
+│ provider : LLMProviderContract
+│ model : Model
+│
+│ /* API operation */
+│ generate_embeddings : seq STRING → seq Vector
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Model must be embedding type */
+│ model.data.model_type = embedding
+│
+│ /* Input must not exceed batch size */
+│ ∀ texts : seq STRING •
+│   generate_embeddings is defined for texts ⇒
+│     #texts ≤ model.data.max_batch_size
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Output count matches input count */
+│ ∀ texts : seq STRING •
+│   let embeddings = generate_embeddings(texts)
+│   #embeddings = #texts
+│
+│ /* Embedding dimensionality matches model */
+│ ∀ texts : seq STRING •
+│   let embeddings = generate_embeddings(texts)
+│   ∀ i : dom embeddings •
+│     #embeddings(i) = model.data.embedding_dim
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RerankRequest: Request for reranking documents
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RerankRequest
+├─────────────────────────────────────────────────────────────────
+│ model : STRING
+│ query : STRING
+│ documents : seq STRING
+│ top_n : ℕ
+├─────────────────────────────────────────────────────────────────
+│ /* Query must not be empty */
+│ query ≠ ""
+│
+│ /* Documents must be non-empty */
+│ #documents > 0
+│
+│ /* Top-n must be reasonable */
+│ 1 ≤ top_n ≤ #documents
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RerankResult: Single reranked result
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RerankResult
+├─────────────────────────────────────────────────────────────────
+│ index : ℕ
+│ relevance_score : ℝ
+│ document : STRING
+├─────────────────────────────────────────────────────────────────
+│ /* Index refers to original document */
+│ index ≥ 0
+│
+│ /* Score is normalized */
+│ 0.0 ≤ relevance_score ≤ 1.0
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RerankResponse: Response with reranked results
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RerankResponse
+├─────────────────────────────────────────────────────────────────
+│ results : seq RerankResult
+├─────────────────────────────────────────────────────────────────
+│ /* Results are sorted by relevance */
+│ ∀ i, j : dom results • i < j ⇒
+│   results(i).relevance_score ≥ results(j).relevance_score
+│
+│ /* Number of results matches request top_n */
+│ /* Handled by request/response pairing */
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RerankAPIContract: Contract for reranking API
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RerankAPIContract
+├─────────────────────────────────────────────────────────────────
+│ provider : LLMProviderContract
+│ model : Model
+│
+│ /* API operation */
+│ rerank : (STRING × seq STRING × ℕ) → seq RerankResult
+├─────────────────────────────────────────────────────────────────
+│ /* PRECONDITIONS */
+│
+│ /* Model must be reranker type */
+│ model.data.model_type = reranker
+│
+│ /* POSTCONDITIONS */
+│
+│ /* Results are properly sorted */
+│ ∀ query : STRING; docs : seq STRING; top_n : ℕ •
+│   let results = rerank(query, docs, top_n)
+│   ∀ i, j : dom results • i < j ⇒
+│     results(i).relevance_score ≥ results(j).relevance_score
+│
+│ /* Number of results respects top_n */
+│ ∀ query : STRING; docs : seq STRING; top_n : ℕ •
+│   let results = rerank(query, docs, top_n)
+│   #results = min(top_n, #docs)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ SECTION 6: Error Handling Contracts
+─────────────────────────────────────────────────────────────────
+
+/*
+ * APIError: Standard error format
+ */
+┌─────────────────────────────────────────────────────────────────
+│ APIError
+├─────────────────────────────────────────────────────────────────
+│ code : STRING
+│ message : STRING
+│ status_code : HTTPStatus
+│ retryable : BOOL
+├─────────────────────────────────────────────────────────────────
+│ /* Error codes follow standard patterns */
+│ code ∈ {"invalid_request", "authentication_failed", 
+│          "rate_limit_exceeded", "server_error", 
+│          "model_not_found", "timeout"}
+│
+│ /* Status codes match error types */
+│ code = "invalid_request" ⇒ status_code = 400
+│ code = "authentication_failed" ⇒ status_code = 401
+│ code = "rate_limit_exceeded" ⇒ status_code = 429
+│ code = "server_error" ⇒ status_code ≥ 500
+│
+│ /* Retryable errors are transient */
+│ retryable = true ⇒ 
+│   code ∈ {"rate_limit_exceeded", "server_error", "timeout"}
+└─────────────────────────────────────────────────────────────────
+
+/*
+ * RetryPolicy: Retry strategy for failed requests
+ */
+┌─────────────────────────────────────────────────────────────────
+│ RetryPolicy
+├─────────────────────────────────────────────────────────────────
+│ max_retries : ℕ
+│ initial_delay : ℕ
+│ backoff_factor : ℝ
+│
+│ /* Retry decision */
+│ should_retry : (APIError × ℕ) → BOOL
+│
+│ /* Delay calculation */
+│ calculate_delay : ℕ → ℕ
+├─────────────────────────────────────────────────────────────────
+│ /* Max retries is reasonable */
+│ 0 ≤ max_retries ≤ 5
+│
+│ /* Initial delay is positive */
+│ initial_delay > 0
+│
+│ /* Backoff factor is reasonable */
+│ 1.0 ≤ backoff_factor ≤ 3.0
+│
+│ /* Retry only retryable errors under limit */
+│ ∀ error : APIError; attempt : ℕ •
+│   should_retry(error, attempt) ⇒
+│     error.retryable = true ∧ attempt < max_retries
+│
+│ /* Exponential backoff */
+│ ∀ attempt : ℕ •
+│   calculate_delay(attempt) = 
+│     initial_delay * (backoff_factor ^ attempt)
+└─────────────────────────────────────────────────────────────────
+
+─────────────────────────────────────────────────────────────────
+ END OF EXTERNAL INTEGRATION CONTRACTS SPECIFICATION
+─────────────────────────────────────────────────────────────────
