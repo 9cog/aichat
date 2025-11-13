@@ -1,0 +1,687 @@
+/**
+ * AIChat Data Model Formal Specification (Z++)
+ * 
+ * This file formalizes the data layer of the AIChat system, including
+ * entity definitions, state invariants, and relationships between data models.
+ * 
+ * The specification focuses on backend core logic: configuration, models,
+ * messages, sessions, roles, agents, RAG systems, and functions.
+ */
+
+// ============================================================================
+// Basic Types and Constants
+// ============================================================================
+
+/**
+ * Basic string type representing UTF-8 encoded text
+ */
+[String]
+  value: seq ℤ
+where
+  ∀ c : value • 0 ≤ c ≤ 1114111  // Valid Unicode code points
+
+/**
+ * Optional value type
+ */
+[Option[T]]
+  isSome: 𝔹
+  value: T
+where
+  isSome ⇒ value ≠ ⊥
+
+/**
+ * Floating point number (representing f64 in Rust)
+ */
+[Float64]
+  value: ℝ
+where
+  -∞ < value < ∞
+
+/**
+ * Unsigned 32-bit integer
+ */
+[UInt32]
+  value: ℤ
+where
+  0 ≤ value ≤ 4294967295
+
+/**
+ * Unix timestamp in seconds
+ */
+[Timestamp]
+  seconds: ℤ
+where
+  seconds ≥ 0
+
+/**
+ * JSON value representation
+ */
+JsonValue ::= Null | Boolean⟨𝔹⟩ | Number⟨ℝ⟩ | String⟨String⟩ 
+            | Array⟨seq JsonValue⟩ | Object⟨String ⇸ JsonValue⟩
+
+// ============================================================================
+// Enumeration Types
+// ============================================================================
+
+/**
+ * Working mode of the application
+ */
+WorkingMode ::= CMD | REPL | Serve
+
+/**
+ * Message role in conversation
+ */
+MessageRole ::= System | User | Assistant | Tool
+
+/**
+ * Model type classification
+ */
+ModelType ::= Chat | Embedding | Reranker
+
+/**
+ * Client type for LLM providers
+ */
+ClientType ::= OpenAI | OpenAICompatible | Gemini | Claude | Cohere 
+             | AzureOpenAI | VertexAI | Bedrock
+
+// ============================================================================
+// Model Entity
+// ============================================================================
+
+/**
+ * ModelData represents the metadata and capabilities of an LLM model.
+ * 
+ * Invariants:
+ * - Model must have a name
+ * - Token limits must be positive if specified
+ * - Prices must be non-negative if specified
+ * - Input tokens cannot exceed model's max input tokens
+ */
+[ModelData]
+  name: String
+  realName: Option[String]
+  modelType: String
+  maxInputTokens: Option[ℤ]
+  maxOutputTokens: Option[ℤ]
+  inputPrice: Option[Float64]
+  outputPrice: Option[Float64]
+  supportsVision: 𝔹
+  supportsFunctionCalling: 𝔹
+where
+  name.value ≠ ⟨⟩  // Non-empty name
+  ∧ (∃ max : maxInputTokens.value • max > 0)
+  ∧ (∃ max : maxOutputTokens.value • max > 0)
+  ∧ (∃ price : inputPrice.value • price ≥ 0.0)
+  ∧ (∃ price : outputPrice.value • price ≥ 0.0)
+
+/**
+ * Model associates a client name with model data.
+ */
+[Model]
+  clientName: String
+  data: ModelData
+where
+  clientName.value ≠ ⟨⟩  // Non-empty client name
+
+/**
+ * Model identifier composition
+ */
+modelId : Model → String
+modelId(m) = if m.data.name.value = ⟨⟩ 
+             then m.clientName 
+             else m.clientName ++ ":" ++ m.data.name
+
+// ============================================================================
+// Message Entity
+// ============================================================================
+
+/**
+ * Message content can be text, image, or tool calls
+ */
+MessageContentPart ::= Text⟨String⟩ 
+                     | ImageUrl⟨url: String, detail: Option[String]⟩
+
+[MessageContent]
+  parts: seq MessageContentPart
+where
+  #parts > 0  // At least one content part
+
+/**
+ * Tool call represents a function invocation request from the LLM
+ */
+[ToolCall]
+  id: String
+  name: String
+  arguments: JsonValue
+where
+  id.value ≠ ⟨⟩
+  ∧ name.value ≠ ⟨⟩
+  ∧ arguments ≠ Null
+
+/**
+ * Message in a conversation
+ * 
+ * Invariants:
+ * - Tool role messages must have a corresponding tool call ID
+ * - Assistant messages with tool calls must have function calling content
+ */
+[Message]
+  role: MessageRole
+  content: MessageContent
+  toolCalls: seq ToolCall
+  toolCallId: Option[String]
+where
+  (role = Tool ⇒ toolCallId.isSome)
+  ∧ (#toolCalls > 0 ⇒ role = Assistant)
+
+/**
+ * Token estimation for a message
+ */
+estimateMessageTokens : Message → ℤ
+estimateMessageTokens(m) = 
+  let textLength = Σ_{p ∈ m.content.parts} contentLength(p)
+  in ⌈textLength / 4⌉ + 5  // Rough estimate: 4 chars per token + overhead
+
+// ============================================================================
+// Configuration Entity
+// ============================================================================
+
+/**
+ * Client configuration for an LLM provider
+ * 
+ * Each client has a unique name and type, with provider-specific settings.
+ */
+[ClientConfig]
+  name: String
+  clientType: ClientType
+  apiKey: Option[String]
+  apiBase: Option[String]
+  models: seq ModelData
+  extraConfig: String ⇸ JsonValue
+where
+  name.value ≠ ⟨⟩
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #models ∧ j < #models 
+     • models[i].name ≠ models[j].name)  // Unique model names
+
+/**
+ * Global application configuration
+ * 
+ * Invariants:
+ * - Must have at least one client configured
+ * - Model ID must reference a valid model from a configured client
+ * - Temperature must be in valid range [0.0, 2.0]
+ * - Top-p must be in valid range [0.0, 1.0]
+ * - RAG top-k must be positive
+ * - Compress threshold must be positive
+ */
+[Config]
+  modelId: String
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  
+  dryRun: 𝔹
+  stream: 𝔹
+  save: 𝔹
+  keybindings: String
+  editor: Option[String]
+  wrap: Option[String]
+  wrapCode: 𝔹
+  
+  functionCalling: 𝔹
+  mappingTools: String ⇸ String
+  useTools: Option[String]
+  
+  replPrelude: Option[String]
+  cmdPrelude: Option[String]
+  agentPrelude: Option[String]
+  
+  saveSession: Option[𝔹]
+  compressThreshold: ℤ
+  summarizePrompt: Option[String]
+  summaryPrompt: Option[String]
+  
+  ragEmbeddingModel: Option[String]
+  ragRerankerModel: Option[String]
+  ragTopK: ℤ
+  ragChunkSize: Option[ℤ]
+  ragChunkOverlap: Option[ℤ]
+  ragTemplate: Option[String]
+  
+  documentLoaders: String ⇸ String
+  
+  highlight: 𝔹
+  theme: Option[String]
+  leftPrompt: Option[String]
+  rightPrompt: Option[String]
+  
+  serveAddr: Option[String]
+  userAgent: Option[String]
+  saveShellHistory: 𝔹
+  syncModelsUrl: Option[String]
+  
+  clients: seq ClientConfig
+  
+  workingMode: WorkingMode
+  infoFlag: 𝔹
+where
+  #clients > 0  // At least one client
+  ∧ modelId.value ≠ ⟨⟩
+  ∧ (∃ t : temperature.value • 0.0 ≤ t ≤ 2.0)
+  ∧ (∃ p : topP.value • 0.0 ≤ p ≤ 1.0)
+  ∧ compressThreshold > 0
+  ∧ ragTopK > 0
+  ∧ (∃ size : ragChunkSize.value • size > 0)
+  ∧ (∃ overlap : ragChunkOverlap.value • overlap ≥ 0)
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #clients ∧ j < #clients 
+     • clients[i].name ≠ clients[j].name)  // Unique client names
+
+// ============================================================================
+// Role Entity
+// ============================================================================
+
+/**
+ * Role defines LLM behavior through a prompt template
+ * 
+ * Invariants:
+ * - Role must have a non-empty name
+ * - If model override is specified, it must be a valid model ID
+ */
+[Role]
+  name: String
+  prompt: String
+  modelId: Option[String]
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  useTools: Option[String]
+  model: Model
+where
+  name.value ≠ ⟨⟩
+  ∧ (∃ t : temperature.value • 0.0 ≤ t ≤ 2.0)
+  ∧ (∃ p : topP.value • 0.0 ≤ p ≤ 1.0)
+
+/**
+ * Built-in system roles
+ */
+SHELL_ROLE: String = "%shell%"
+EXPLAIN_SHELL_ROLE: String = "%explain-shell%"
+CODE_ROLE: String = "%code%"
+CREATE_TITLE_ROLE: String = "%create-title%"
+TEMP_ROLE_NAME: String = "%%"
+
+// ============================================================================
+// Session Entity
+// ============================================================================
+
+/**
+ * Session maintains conversation context and message history
+ * 
+ * Invariants:
+ * - Session must have a non-empty name
+ * - Messages must alternate between user and assistant (after initial system message)
+ * - Compressed messages are older than current messages
+ * - Token count must match actual message tokens
+ * - If save_session is enabled, session should be persisted
+ */
+[Session]
+  name: String
+  modelId: String
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  useTools: Option[String]
+  saveSession: Option[𝔹]
+  compressThreshold: Option[ℤ]
+  
+  roleName: Option[String]
+  agentVariables: String ⇸ String
+  agentInstructions: String
+  
+  compressedMessages: seq Message
+  messages: seq Message
+  dataUrls: String ⇸ String
+  
+  model: Model
+  rolePrompt: String
+  path: Option[String]
+  dirty: 𝔹
+  saveSessionThisTime: 𝔹
+  compressing: 𝔹
+  tokens: ℤ
+where
+  name.value ≠ ⟨⟩
+  ∧ modelId.value ≠ ⟨⟩
+  ∧ tokens = Σ_{m ∈ compressedMessages ++ messages} estimateMessageTokens(m)
+  ∧ (∃ threshold : compressThreshold.value 
+     • threshold > 0 ∧ (tokens > threshold ⇒ compressing))
+  ∧ (dirty ⇒ #messages > 0)  // Dirty implies messages exist
+
+/**
+ * Session is empty if no messages
+ */
+sessionIsEmpty : Session → 𝔹
+sessionIsEmpty(s) = (#s.messages = 0) ∧ (#s.compressedMessages = 0)
+
+/**
+ * Count user messages in session
+ */
+userMessageCount : Session → ℤ
+userMessageCount(s) = #{m ∈ s.messages | m.role = User}
+
+// ============================================================================
+// Agent Entity
+// ============================================================================
+
+/**
+ * Agent variable definition
+ */
+[AgentVariable]
+  name: String
+  description: Option[String]
+  default: Option[String]
+where
+  name.value ≠ ⟨⟩
+
+/**
+ * Agent definition from configuration
+ */
+[AgentDefinition]
+  name: String
+  description: String
+  version: String
+  instructions: String
+  variables: seq AgentVariable
+  documents: seq String
+  conversationStarters: seq String
+where
+  name.value ≠ ⟨⟩
+  ∧ version.value ≠ ⟨⟩
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #variables ∧ j < #variables 
+     • variables[i].name ≠ variables[j].name)  // Unique variable names
+
+/**
+ * Agent configuration
+ */
+[AgentConfig]
+  modelId: Option[String]
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  useTools: Option[String]
+where
+  (∃ t : temperature.value • 0.0 ≤ t ≤ 2.0)
+  ∧ (∃ p : topP.value • 0.0 ≤ p ≤ 1.0)
+
+/**
+ * Agent combines instructions, tools, and documents (RAG)
+ * 
+ * Invariants:
+ * - Agent must have a unique name
+ * - Shared variables apply to all sessions
+ * - Session variables override shared variables when present
+ * - RAG is optional but must be valid if present
+ */
+[Agent]
+  name: String
+  config: AgentConfig
+  definition: AgentDefinition
+  sharedVariables: String ⇸ String
+  sessionVariables: Option[String ⇸ String]
+  sharedDynamicInstructions: Option[String]
+  sessionDynamicInstructions: Option[String]
+  model: Model
+where
+  name.value ≠ ⟨⟩
+  ∧ name = definition.name
+  ∧ (∀ v : definition.variables 
+     • (v.name ∈ dom sharedVariables) ∨ v.default.isSome)
+
+/**
+ * Effective agent variables (session overrides shared)
+ */
+effectiveVariables : Agent → (String ⇸ String)
+effectiveVariables(a) = 
+  if a.sessionVariables.isSome 
+  then a.sharedVariables ⊕ a.sessionVariables.value
+  else a.sharedVariables
+
+// ============================================================================
+// Function Calling Entity
+// ============================================================================
+
+/**
+ * Function parameter definition
+ */
+[FunctionParameter]
+  name: String
+  type: String
+  description: String
+  required: 𝔹
+  enum: Option[seq String]
+where
+  name.value ≠ ⟨⟩
+  ∧ type.value ≠ ⟨⟩
+
+/**
+ * Function declaration for LLM function calling
+ */
+[FunctionDeclaration]
+  name: String
+  description: String
+  parameters: seq FunctionParameter
+where
+  name.value ≠ ⟨⟩
+  ∧ description.value ≠ ⟨⟩
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #parameters ∧ j < #parameters 
+     • parameters[i].name ≠ parameters[j].name)
+
+/**
+ * Tool result after function execution
+ */
+[ToolResult]
+  call: ToolCall
+  output: JsonValue
+
+/**
+ * Functions collection
+ */
+[Functions]
+  declarations: seq FunctionDeclaration
+where
+  (∀ i, j : ℕ | i ≠ j ∧ i < #declarations ∧ j < #declarations 
+   • declarations[i].name ≠ declarations[j].name)  // Unique function names
+
+/**
+ * Find function by name
+ */
+findFunction : Functions × String → Option[FunctionDeclaration]
+findFunction(fs, name) = 
+  if (∃ f : fs.declarations • f.name = name)
+  then Some(the f : fs.declarations | f.name = name)
+  else None
+
+// ============================================================================
+// RAG Entity
+// ============================================================================
+
+/**
+ * Document chunk for vector search
+ */
+[Chunk]
+  id: String
+  text: String
+  embedding: seq Float64
+  metadata: String ⇸ JsonValue
+where
+  id.value ≠ ⟨⟩
+  ∧ text.value ≠ ⟨⟩
+  ∧ #embedding > 0
+
+/**
+ * Document loaded into RAG
+ */
+[Document]
+  path: String
+  content: String
+  chunks: seq Chunk
+  loader: String
+where
+  path.value ≠ ⟨⟩
+  ∧ #chunks > 0
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #chunks ∧ j < #chunks 
+     • chunks[i].id ≠ chunks[j].id)  // Unique chunk IDs
+
+/**
+ * RAG (Retrieval-Augmented Generation) system
+ * 
+ * Invariants:
+ * - Must have a unique name
+ * - Must have at least one document
+ * - Embedding dimension must be consistent across all chunks
+ * - Top-k must be positive and not exceed total chunks
+ */
+[Rag]
+  name: String
+  documents: seq Document
+  embeddingModel: String
+  rerankerModel: Option[String]
+  topK: ℤ
+  chunkSize: ℤ
+  chunkOverlap: ℤ
+  template: String
+  path: String
+where
+  name.value ≠ ⟨⟩
+  ∧ #documents > 0
+  ∧ topK > 0
+  ∧ chunkSize > 0
+  ∧ chunkOverlap ≥ 0
+  ∧ chunkOverlap < chunkSize
+  ∧ let totalChunks = Σ_{d ∈ documents} #d.chunks
+    in topK ≤ totalChunks
+  ∧ let embeddingDim = if (#documents > 0 ∧ #(documents[0].chunks) > 0)
+                        then #(documents[0].chunks[0].embedding)
+                        else 0
+    in (∀ d : documents, c : d.chunks • #c.embedding = embeddingDim)
+
+/**
+ * Query result from RAG retrieval
+ */
+[RagQueryResult]
+  query: String
+  retrievedChunks: seq Chunk
+  scores: seq Float64
+where
+  #retrievedChunks = #scores
+  ∧ (∀ i : ℕ | i < #scores • scores[i] ≥ 0.0)
+
+// ============================================================================
+// Macro Entity
+// ============================================================================
+
+/**
+ * Macro variable definition
+ */
+[MacroVariable]
+  name: String
+  description: String
+  default: Option[String]
+where
+  name.value ≠ ⟨⟩
+
+/**
+ * Macro for automating REPL command sequences
+ */
+[Macro]
+  name: String
+  description: String
+  variables: seq MacroVariable
+  commands: seq String
+where
+  name.value ≠ ⟨⟩
+  ∧ #commands > 0
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #variables ∧ j < #variables 
+     • variables[i].name ≠ variables[j].name)
+
+// ============================================================================
+// Input Entity
+// ============================================================================
+
+/**
+ * Input source type
+ */
+InputSource ::= Stdin | File⟨path: String⟩ | Url⟨url: String⟩ 
+              | Command⟨cmd: String⟩
+
+/**
+ * Input data with metadata
+ */
+[InputData]
+  source: InputSource
+  content: String
+  mimeType: Option[String]
+  isImage: 𝔹
+where
+  content.value ≠ ⟨⟩
+  ∧ (isImage ⇒ mimeType.isSome)
+
+/**
+ * Input collection for a query
+ */
+[Input]
+  text: Option[String]
+  data: seq InputData
+  useTools: Option[String]
+  
+/**
+ * Combined input is valid if it has text or data
+ */
+inputIsValid : Input → 𝔹
+inputIsValid(i) = i.text.isSome ∨ #i.data > 0
+
+// ============================================================================
+// Data Integrity Invariants
+// ============================================================================
+
+/**
+ * Global data integrity constraints
+ */
+[DataIntegrity]
+  config: Config
+  models: seq Model
+  sessions: seq Session
+  roles: seq Role
+  agents: seq Agent
+  rags: seq Rag
+  functions: Functions
+where
+  // All models referenced in config must exist
+  (∃ m : models • modelId(m) = config.modelId)
+  
+  // All session models must be valid
+  ∧ (∀ s : sessions • ∃ m : models • modelId(m) = s.modelId)
+  
+  // All role model IDs (if specified) must be valid
+  ∧ (∀ r : roles, mid : r.modelId.value 
+     • ∃ m : models • modelId(m) = mid)
+  
+  // All agent model IDs (if specified) must be valid
+  ∧ (∀ a : agents, mid : a.config.modelId.value 
+     • ∃ m : models • modelId(m) = mid)
+  
+  // Session role names must reference valid roles
+  ∧ (∀ s : sessions, rname : s.roleName.value 
+     • ∃ r : roles • r.name = rname)
+  
+  // Unique session names
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #sessions ∧ j < #sessions 
+     • sessions[i].name ≠ sessions[j].name)
+  
+  // Unique role names
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #roles ∧ j < #roles 
+     • roles[i].name ≠ roles[j].name)
+  
+  // Unique agent names
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #agents ∧ j < #agents 
+     • agents[i].name ≠ agents[j].name)
+  
+  // Unique RAG names
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #rags ∧ j < #rags 
+     • rags[i].name ≠ rags[j].name)
