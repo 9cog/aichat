@@ -1,0 +1,775 @@
+/**
+ * AIChat Operations Formal Specification (Z++)
+ * 
+ * This file formalizes the core operations of the AIChat system, including
+ * configuration operations, session management, message processing,
+ * RAG operations, and function calling.
+ */
+
+// ============================================================================
+// Configuration Operations
+// ============================================================================
+
+/**
+ * Initialize application configuration
+ * 
+ * Pre-conditions:
+ * - Configuration file exists or can be created with defaults
+ * - At least one LLM client is configured
+ * 
+ * Post-conditions:
+ * - Configuration is loaded and validated
+ * - Default model is selected
+ * - Working mode is determined
+ */
+InitConfig
+  ApplicationState'
+  configPath: String
+  mode: WorkingMode
+  infoFlag: 𝔹
+where
+  // Configuration loaded from file or defaults
+  config'.workingMode = mode
+  ∧ config'.infoFlag = infoFlag
+  
+  // At least one client configured
+  ∧ #config'.clients > 0
+  
+  // Models loaded from clients
+  ∧ availableModels' = flatten [Model::from_config(c.name, c.models) 
+                                | c ∈ config'.clients]
+  
+  // Default model selected
+  ∧ (∃ m : availableModels' • modelId(m) = config'.modelId ∧ currentModel' = m)
+  
+  // Initial state
+  ∧ sessions' = ⟨⟩
+  ∧ activeSession'.isSome = false
+  ∧ abortSignal' = false
+  ∧ dryRunMode' = config'.dryRun
+
+/**
+ * Update configuration setting
+ */
+ΔUpdateConfig
+  ApplicationState
+  ApplicationState'
+  setting: String
+  value: JsonValue
+where
+  // Configuration updated
+  config' = updateConfigField(config, setting, value)
+  
+  // Validate new configuration
+  ∧ validateState(ApplicationState'⟨config', ...⟩) = Valid
+  
+  // Update dependent state
+  ∧ (setting = "model" ⇒ 
+     ∃ m : availableModels' • modelId(m) = value ∧ currentModel' = m)
+  
+  // Other state unchanged
+  ∧ sessions' = sessions
+  ∧ activeSession' = activeSession
+
+/**
+ * Sync models from remote URL
+ */
+SyncModels
+  ΞApplicationState
+  url: String
+  output: seq ModelData
+where
+  // Fetch models from URL
+  output = fetchModelsFromUrl(url)
+  
+  // No state change (models updated externally)
+  ∧ ApplicationState' = ApplicationState
+
+// ============================================================================
+// Model Operations
+// ============================================================================
+
+/**
+ * Select model for current session
+ */
+ΔSelectModel
+  ApplicationState
+  ApplicationState'
+  modelId: String
+where
+  // Model must exist
+  ∃ m : availableModels • modelId(m) = modelId
+  
+  // Update current model
+  ∧ currentModel' = (the m : availableModels | modelId(m) = modelId)
+  
+  // Update active session model if present
+  ∧ (activeSession.isSome ⇒ 
+     activeSession'.value.model = currentModel'
+     ∧ activeSession'.value.modelId = modelId)
+  
+  // Other state unchanged
+  ∧ config' = config
+  ∧ sessions' = sessions
+
+/**
+ * List available models
+ */
+ΞListModels
+  ApplicationState
+  modelType: ModelType
+  output: seq Model
+where
+  output = [m : availableModels | m.data.modelType = modelType]
+
+// ============================================================================
+// Session Operations
+// ============================================================================
+
+/**
+ * Create new session
+ * 
+ * Pre-conditions:
+ * - Session name is unique
+ * - Working mode supports sessions (REPL)
+ * 
+ * Post-conditions:
+ * - New session created and added to sessions
+ * - Session becomes active session
+ * - Session has current model and role
+ */
+ΔCreateSession
+  ApplicationState
+  ApplicationState'
+  name: String
+where
+  // Pre-conditions
+  name.value ≠ ⟨⟩
+  ∧ ¬(∃ s : sessions • s.name = name)
+  ∧ workingMode = REPL
+  
+  // Create new session
+  ∧ let newSession = Session⟨
+      name = name,
+      modelId = modelId(currentModel),
+      model = currentModel,
+      saveSession = config.saveSession,
+      compressThreshold = Some(config.compressThreshold),
+      messages = ⟨⟩,
+      compressedMessages = ⟨⟩,
+      tokens = 0,
+      dirty = false,
+      ...
+    ⟩
+    in sessions' = sessions ++ ⟨newSession⟩
+       ∧ activeSession' = Some(newSession)
+  
+  // Apply current role if active
+  ∧ (activeRole.isSome ⇒ 
+     activeSession'.value.roleName = Some(activeRole.value.name)
+     ∧ activeSession'.value.rolePrompt = activeRole.value.prompt)
+
+/**
+ * Load existing session
+ */
+ΔLoadSession
+  ApplicationState
+  ApplicationState'
+  name: String
+  path: String
+where
+  // Pre-conditions
+  path.value ≠ ⟨⟩
+  ∧ fileExists(path)
+  
+  // Load session from file
+  ∧ ∃ session : Session • 
+      session = parseSessionFromFile(path)
+      ∧ session.name = name
+      ∧ sessions' = sessions ++ ⟨session⟩
+      ∧ activeSession' = Some(session)
+  
+  // Validate session model
+  ∧ ∃ m : availableModels • modelId(m) = activeSession'.value.modelId
+
+/**
+ * Save session to file
+ */
+ΔSaveSession
+  ApplicationState
+  ApplicationState'
+where
+  // Pre-conditions
+  activeSession.isSome
+  ∧ activeSession.value.dirty
+  
+  // Save to file
+  ∧ let session = activeSession.value
+        path = session.path.value
+    in writeSessionToFile(path, session)
+  
+  // Mark as clean
+  ∧ activeSession'.value.dirty = false
+  ∧ sessions' = [s : sessions | s.name ≠ activeSession.value.name] 
+                ++ ⟨activeSession'.value⟩
+
+/**
+ * Switch to different session
+ */
+ΔSwitchSession
+  ApplicationState
+  ApplicationState'
+  name: String
+where
+  // Session must exist
+  ∃ s : sessions • s.name = name
+  
+  // Save current session if dirty
+  ∧ (activeSession.isSome ∧ activeSession.value.dirty ⇒ 
+     saveSessionBefore(activeSession.value))
+  
+  // Switch to new session
+  ∧ activeSession' = Some(the s : sessions | s.name = name)
+  
+  // Update current model to session's model
+  ∧ currentModel' = activeSession'.value.model
+
+/**
+ * Delete session
+ */
+ΔDeleteSession
+  ApplicationState
+  ApplicationState'
+  name: String
+where
+  // Session must exist
+  ∃ s : sessions • s.name = name
+  
+  // Cannot delete active session
+  ∧ (activeSession.isSome ⇒ activeSession.value.name ≠ name)
+  
+  // Remove from sessions
+  ∧ sessions' = [s : sessions | s.name ≠ name]
+  
+  // Delete file if it exists
+  ∧ let session = (the s : sessions | s.name = name)
+    in session.path.isSome ⇒ deleteFile(session.path.value)
+
+/**
+ * Compress session messages
+ * 
+ * Compresses old messages when token threshold exceeded
+ */
+ΔCompressSession
+  ApplicationState
+  ApplicationState'
+where
+  // Pre-conditions
+  activeSession.isSome
+  ∧ activeSession.value.tokens > activeSession.value.compressThreshold.value
+  ∧ #activeSession.value.messages > 1
+  
+  // Generate summary of messages to compress
+  ∧ let session = activeSession.value
+        messagesToCompress = take(#session.messages / 2, session.messages)
+        summary = generateSummary(messagesToCompress)
+        summaryMessage = Message⟨
+          role = System,
+          content = MessageContent⟨[Text(summary)]⟩,
+          toolCalls = ⟨⟩,
+          toolCallId = None
+        ⟩
+    in activeSession'.value.compressedMessages = 
+         session.compressedMessages ++ ⟨summaryMessage⟩
+       ∧ activeSession'.value.messages = 
+         drop(#session.messages / 2, session.messages)
+       ∧ activeSession'.value.tokens = 
+         Σ_{m ∈ activeSession'.value.compressedMessages ++ 
+             activeSession'.value.messages} estimateMessageTokens(m)
+
+// ============================================================================
+// Role Operations
+// ============================================================================
+
+/**
+ * Set active role
+ */
+ΔSetRole
+  ApplicationState
+  ApplicationState'
+  roleName: String
+where
+  // Role must exist
+  ∃ r : roles • r.name = roleName
+  
+  // Set active role
+  ∧ activeRole' = Some(the r : roles | r.name = roleName)
+  
+  // Update session if active
+  ∧ (activeSession.isSome ⇒ 
+     activeSession'.value.roleName = Some(roleName)
+     ∧ activeSession'.value.rolePrompt = activeRole'.value.prompt
+     ∧ activeSession'.value.dirty = true)
+  
+  // Update model if role specifies one
+  ∧ (activeRole'.value.modelId.isSome ⇒ 
+     ∃ m : availableModels • modelId(m) = activeRole'.value.modelId.value
+     ∧ currentModel' = m)
+
+/**
+ * Clear active role
+ */
+ΔClearRole
+  ApplicationState
+  ApplicationState'
+where
+  activeRole' = None
+  ∧ (activeSession.isSome ⇒ 
+     activeSession'.value.roleName = None
+     ∧ activeSession'.value.rolePrompt = ""
+     ∧ activeSession'.value.dirty = true)
+
+/**
+ * List available roles
+ */
+ΞListRoles
+  ApplicationState
+  includeBuiltin: 𝔹
+  output: seq String
+where
+  output = [r.name | r : roles]
+         ++ (if includeBuiltin 
+             then ⟨SHELL_ROLE, EXPLAIN_SHELL_ROLE, CODE_ROLE⟩ 
+             else ⟨⟩)
+
+// ============================================================================
+// Agent Operations
+// ============================================================================
+
+/**
+ * Initialize and activate agent
+ */
+ΔActivateAgent
+  ApplicationState
+  ApplicationState'
+  agentName: String
+  variables: String ⇸ String
+where
+  // Agent must exist
+  ∃ a : agents • a.name = agentName
+  
+  // Initialize agent variables
+  ∧ let agent = (the a : agents | a.name = agentName)
+        initVars = Agent::init_agent_variables(
+          agent.definition.variables, 
+          variables, 
+          config.infoFlag
+        )
+    in activeAgent' = Some(Agent⟨
+         ...agent,
+         sharedVariables = initVars
+       ⟩)
+  
+  // Clear active session (agents use their own context)
+  ∧ activeSession' = None
+  
+  // Load agent's RAG if available
+  ∧ (activeAgent'.value.rag.isSome ⇒ 
+     activeRag' = Some(activeAgent'.value.rag.value))
+
+/**
+ * Deactivate agent
+ */
+ΔDeactivateAgent
+  ApplicationState
+  ApplicationState'
+where
+  activeAgent' = None
+  ∧ activeRag' = None
+
+/**
+ * Update agent variables
+ */
+ΔUpdateAgentVariables
+  ApplicationState
+  ApplicationState'
+  variables: String ⇸ String
+  sessionScope: 𝔹
+where
+  // Agent must be active
+  activeAgent.isSome
+  
+  // Update variables in appropriate scope
+  ∧ if sessionScope
+    then activeAgent'.value.sessionVariables = Some(variables)
+    else activeAgent'.value.sharedVariables = 
+         activeAgent.value.sharedVariables ⊕ variables
+
+// ============================================================================
+// Message Processing Operations
+// ============================================================================
+
+/**
+ * Process user input and send to LLM
+ * 
+ * This is the main operation for chat interaction
+ */
+ΔProcessInput
+  ApplicationState
+  ApplicationState'
+  input: Input
+  output: String
+  error: Option[String]
+where
+  // Pre-conditions
+  inputIsValid(input)
+  ∧ (workingMode = REPL ⇒ activeSession.isSome)
+  
+  // Build message context
+  ∧ let userMessage = buildMessageFromInput(input)
+        roleMessages = if activeRole.isSome 
+                       then buildRoleContext(activeRole.value) 
+                       else ⟨⟩
+        sessionMessages = if activeSession.isSome 
+                          then activeSession.value.compressedMessages 
+                               ++ activeSession.value.messages
+                          else ⟨⟩
+        agentMessages = if activeAgent.isSome 
+                        then buildAgentContext(activeAgent.value) 
+                        else ⟨⟩
+        ragContext = if activeRag.isSome ∧ input.text.isSome
+                     then retrieveRagContext(activeRag.value, input.text.value)
+                     else None
+        finalMessages = buildFinalMessages(
+          roleMessages, 
+          sessionMessages, 
+          agentMessages, 
+          userMessage, 
+          ragContext
+        )
+    in processMessages(finalMessages, output, error)
+  
+  // Update session with new messages
+  ∧ (activeSession.isSome ∧ error.isSome = false ⇒ 
+     let userMsg = buildMessageFromInput(input)
+         assistantMsg = Message⟨
+           role = Assistant,
+           content = MessageContent⟨[Text(output)]⟩,
+           toolCalls = ⟨⟩,
+           toolCallId = None
+         ⟩
+     in activeSession'.value.messages = 
+        activeSession.value.messages ++ ⟨userMsg, assistantMsg⟩
+        ∧ activeSession'.value.dirty = true
+        ∧ activeSession'.value.tokens = 
+          Σ_{m ∈ activeSession'.value.messages} estimateMessageTokens(m))
+  
+  // Check if compression needed
+  ∧ (activeSession'.isSome 
+     ∧ activeSession'.value.tokens > config.compressThreshold
+     ⇒ activeSession'.value.compressing = true)
+
+/**
+ * Stream response from LLM
+ */
+ΔStreamResponse
+  ApplicationState
+  ApplicationState'
+  messages: seq Message
+  chunks: seq String
+where
+  // Pre-condition: streaming enabled
+  config.stream = true
+  
+  // Send request and collect chunks
+  ∧ chunks = streamChatCompletion(currentModel, messages)
+  
+  // Assemble full response
+  ∧ let fullResponse = concat(chunks)
+    in ApplicationState' = updateWithResponse(ApplicationState, fullResponse)
+
+/**
+ * Execute function calls from LLM
+ */
+ΔExecuteToolCalls
+  ApplicationState
+  ApplicationState'
+  toolCalls: seq ToolCall
+  results: seq ToolResult
+where
+  // Pre-conditions
+  config.functionCalling = true
+  ∧ #toolCalls > 0
+  
+  // Execute each tool call
+  ∧ results = [ToolResult⟨call, executeTool(call)⟩ | call : toolCalls]
+  
+  // All tool calls must have results
+  ∧ #results = #toolCalls
+  
+  // Results are valid JSON
+  ∧ (∀ r : results • r.output ≠ Null)
+
+// ============================================================================
+// RAG Operations
+// ============================================================================
+
+/**
+ * Initialize RAG system with documents
+ */
+ΔInitRag
+  ApplicationState
+  ApplicationState'
+  name: String
+  documentPaths: seq String
+  ragPath: String
+where
+  // Pre-conditions
+  name.value ≠ ⟨⟩
+  ∧ #documentPaths > 0
+  ∧ ¬(∃ r : rags • r.name = name)
+  
+  // Load documents
+  ∧ let documents = [loadDocument(path) | path : documentPaths]
+        chunks = flatten [splitIntoChunks(doc, config.ragChunkSize, 
+                                         config.ragChunkOverlap) 
+                         | doc : documents]
+        embeddings = generateEmbeddings(chunks, config.ragEmbeddingModel)
+        ragData = Rag⟨
+          name = name,
+          documents = documents,
+          embeddingModel = config.ragEmbeddingModel.value,
+          rerankerModel = config.ragRerankerModel,
+          topK = config.ragTopK,
+          chunkSize = config.ragChunkSize.value,
+          chunkOverlap = config.ragChunkOverlap.value,
+          template = config.ragTemplate.value,
+          path = ragPath
+        ⟩
+    in rags' = rags ++ ⟨ragData⟩
+       ∧ saveRagToFile(ragPath, ragData)
+
+/**
+ * Query RAG system
+ */
+ΞQueryRag
+  ApplicationState
+  ragName: String
+  query: String
+  results: seq Chunk
+where
+  // RAG must exist
+  ∃ r : rags • r.name = ragName
+  
+  // Retrieve relevant chunks
+  ∧ let rag = (the r : rags | r.name = ragName)
+        queryEmbedding = generateEmbedding(query, rag.embeddingModel)
+        candidates = vectorSearch(rag, queryEmbedding, rag.topK * 3)
+        reranked = if rag.rerankerModel.isSome
+                   then rerank(candidates, query, rag.rerankerModel.value)
+                   else candidates
+    in results = take(rag.topK, reranked)
+
+/**
+ * Build RAG context for prompt
+ */
+buildRagContext : Rag × String → String
+buildRagContext(rag, query) = 
+  let chunks = queryRag(rag, query)
+      context = concat([c.text ++ "\n\n" | c : chunks])
+      template = rag.template
+  in replace(replace(template, "__CONTEXT__", context), 
+             "__INPUT__", query)
+
+// ============================================================================
+// Function Calling Operations
+// ============================================================================
+
+/**
+ * Register function declaration
+ */
+ΔRegisterFunction
+  ApplicationState
+  ApplicationState'
+  declaration: FunctionDeclaration
+where
+  // Function name must be unique
+  ¬functions.contains(declaration.name)
+  
+  // Add to functions
+  ∧ functions'.declarations = functions.declarations ++ ⟨declaration⟩
+
+/**
+ * Execute function call
+ */
+ΞExecuteFunction
+  ApplicationState
+  call: ToolCall
+  result: JsonValue
+where
+  // Function must be registered
+  ∃ decl : functions.declarations • decl.name = call.name
+  
+  // Validate arguments against declaration
+  ∧ let declaration = (the d : functions.declarations | d.name = call.name)
+    in validateArguments(declaration, call.arguments)
+  
+  // Execute function (implementation depends on function type)
+  ∧ result = invokeFunction(call)
+  
+  // Dry run mode returns mock result
+  ∧ (dryRunMode ⇒ result = json!{"status": "dry-run"})
+
+// ============================================================================
+// REPL Operations
+// ============================================================================
+
+/**
+ * Execute REPL command
+ */
+ΔExecuteReplCommand
+  ReplState
+  ReplState'
+  command: String
+  output: String
+where
+  workingMode = REPL
+  
+  // Parse command
+  ∧ let (cmd, args) = parseReplCommand(command)
+    in (cmd = ".session" ⇒ handleSessionCommand(args, output))
+       ∨ (cmd = ".role" ⇒ handleRoleCommand(args, output))
+       ∨ (cmd = ".model" ⇒ handleModelCommand(args, output))
+       ∨ (cmd = ".file" ⇒ handleFileCommand(args, output))
+       ∨ (cmd = ".exit" ⇒ output = "Exiting..." ∧ exitRepl())
+  
+  // Update command history
+  ∧ commandHistory' = commandHistory ++ ⟨command⟩
+
+/**
+ * Handle multiline input in REPL
+ */
+ΔHandleMultilineInput
+  ReplState
+  ReplState'
+  line: String
+where
+  // Add to current input
+  currentInput' = currentInput ++ line ++ "\n"
+  
+  // Check if input is complete
+  ∧ if isInputComplete(currentInput')
+    then processInput(currentInput') ∧ currentInput' = ""
+    else multilineMode' = true
+
+// ============================================================================
+// Server Operations
+// ============================================================================
+
+/**
+ * Handle chat completion request
+ */
+ΔHandleChatCompletion
+  ServerState
+  ServerState'
+  request: JsonValue
+  response: JsonValue
+  streaming: 𝔹
+where
+  // Parse request
+  let modelId = request["model"]
+      messages = parseMessages(request["messages"])
+      stream = request["stream"].value
+      temperature = request["temperature"]
+      topP = request["top_p"]
+  
+  // Validate model
+  in (∃ m : availableModels • modelId(m) = modelId)
+  
+  // Process request
+  ∧ let model = (the m : availableModels | modelId(m) = modelId)
+        result = if stream 
+                 then streamChatCompletion(model, messages)
+                 else callChatCompletion(model, messages)
+    in response = formatChatCompletionResponse(result, stream)
+  
+  // Update statistics
+  ∧ totalRequests' = totalRequests + 1
+  ∧ (error.isSome ⇒ totalErrors' = totalErrors + 1)
+
+/**
+ * Handle embeddings request
+ */
+ΔHandleEmbeddings
+  ServerState
+  ServerState'
+  request: JsonValue
+  response: JsonValue
+where
+  // Parse request
+  let modelId = request["model"]
+      input = request["input"]
+  
+  // Validate embedding model
+  in (∃ m : availableModels • modelId(m) = modelId 
+                              ∧ m.data.modelType = "embedding")
+  
+  // Generate embeddings
+  ∧ let model = (the m : availableModels | modelId(m) = modelId)
+        embeddings = generateEmbeddings(input, modelId)
+    in response = formatEmbeddingsResponse(embeddings)
+  
+  // Update statistics
+  ∧ totalRequests' = totalRequests + 1
+
+/**
+ * Handle rerank request
+ */
+ΔHandleRerank
+  ServerState
+  ServerState'
+  request: JsonValue
+  response: JsonValue
+where
+  // Parse request
+  let modelId = request["model"]
+      query = request["query"]
+      documents = request["documents"]
+      topN = request["top_n"]
+  
+  // Validate reranker model
+  in (∃ m : availableModels • modelId(m) = modelId 
+                              ∧ m.data.modelType = "reranker")
+  
+  // Rerank documents
+  ∧ let rankings = rerankDocuments(query, documents, modelId, topN)
+    in response = formatRerankResponse(rankings)
+  
+  // Update statistics
+  ∧ totalRequests' = totalRequests + 1
+
+// ============================================================================
+// Abort Operations
+// ============================================================================
+
+/**
+ * Set abort signal to interrupt operations
+ */
+ΔAbortOperation
+  ApplicationState
+  ApplicationState'
+where
+  abortSignal' = true
+  
+  // Cancel any ongoing processing
+  ∧ (∀ processing : MessageProcessingState 
+     • processing.completed = false ⇒ cancelProcessing(processing))
+
+/**
+ * Clear abort signal
+ */
+ΔClearAbortSignal
+  ApplicationState
+  ApplicationState'
+where
+  abortSignal' = false

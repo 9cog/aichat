@@ -1,0 +1,482 @@
+/**
+ * AIChat System State Formal Specification (Z++)
+ * 
+ * This file formalizes the overall system state of AIChat, including
+ * runtime state, session management, and global application state.
+ */
+
+// ============================================================================
+// System State
+// ============================================================================
+
+/**
+ * ApplicationState represents the complete runtime state of AIChat
+ * 
+ * This is the top-level state schema that encapsulates all application state
+ * including configuration, active sessions, loaded resources, and runtime flags.
+ * 
+ * Invariants:
+ * - Exactly one configuration must be active
+ * - At most one session can be active at a time (for REPL/CMD modes)
+ * - Active session must be in the sessions collection
+ * - Active role must be in the roles collection
+ * - Active agent must be in the agents collection
+ * - Current model must be valid and from configured clients
+ */
+[ApplicationState]
+  // Core configuration
+  config: Config
+  
+  // Model management
+  currentModel: Model
+  availableModels: seq Model
+  
+  // Session management
+  sessions: seq Session
+  activeSession: Option[Session]
+  
+  // Role management
+  roles: seq Role
+  activeRole: Option[Role]
+  
+  // Agent management
+  agents: seq Agent
+  activeAgent: Option[Agent]
+  
+  // RAG management
+  rags: seq Rag
+  activeRag: Option[Rag]
+  
+  // Function management
+  functions: Functions
+  
+  // Runtime state
+  workingMode: WorkingMode
+  abortSignal: 𝔹
+  dryRunMode: 𝔹
+  
+  // Data integrity
+  integrity: DataIntegrity
+where
+  // Configuration consistency
+  config = integrity.config
+  ∧ availableModels = integrity.models
+  ∧ sessions = integrity.sessions
+  ∧ roles = integrity.roles
+  ∧ agents = integrity.agents
+  ∧ rags = integrity.rags
+  ∧ functions = integrity.functions
+  
+  // Current model must be in available models
+  ∧ currentModel ∈ ran availableModels
+  
+  // Active session must be in sessions collection (if present)
+  ∧ (∃ s : activeSession.value • s ∈ ran sessions)
+  
+  // Active role must be in roles collection (if present)
+  ∧ (∃ r : activeRole.value • r ∈ ran roles)
+  
+  // Active agent must be in agents collection (if present)
+  ∧ (∃ a : activeAgent.value • a ∈ ran agents)
+  
+  // Active RAG must be in rags collection (if present)
+  ∧ (∃ rag : activeRag.value • rag ∈ ran rags)
+  
+  // Working mode matches config
+  ∧ workingMode = config.workingMode
+  
+  // Dry run mode matches config
+  ∧ dryRunMode = config.dryRun
+  
+  // Single active context constraint
+  ∧ ¬(activeSession.isSome ∧ activeAgent.isSome)  // Session XOR Agent
+
+/**
+ * Initial application state after startup
+ */
+[InitialState]
+  ApplicationState
+where
+  #sessions = 0
+  ∧ activeSession.isSome = false
+  ∧ activeRole.isSome = false
+  ∧ activeAgent.isSome = false
+  ∧ activeRag.isSome = false
+  ∧ abortSignal = false
+  ∧ #availableModels > 0
+  ∧ currentModel = head availableModels
+
+// ============================================================================
+// REPL State
+// ============================================================================
+
+/**
+ * REPL-specific state for interactive mode
+ * 
+ * Manages the state of the Read-Eval-Print Loop including command history,
+ * current input buffer, and REPL-specific flags.
+ */
+[ReplState]
+  ApplicationState
+  
+  // REPL-specific state
+  commandHistory: seq String
+  currentInput: String
+  multilineMode: 𝔹
+  lastReply: Option[String]
+  
+  // Display state
+  leftPrompt: String
+  rightPrompt: String
+  
+  // Statistics
+  messagesCount: ℤ
+  tokensCount: ℤ
+  consumePercent: Float64
+where
+  workingMode = REPL
+  
+  // Token statistics match active session (if exists)
+  ∧ (∃ s : activeSession.value 
+     • tokensCount = s.tokens
+       ∧ messagesCount = #s.messages
+       ∧ (∃ maxTokens : s.model.data.maxInputTokens.value
+          • consumePercent.value = (tokensCount / maxTokens) * 100.0))
+  
+  // No active session means zero statistics
+  ∧ (¬activeSession.isSome ⇒ messagesCount = 0 ∧ tokensCount = 0)
+
+// ============================================================================
+// CMD State
+// ============================================================================
+
+/**
+ * CMD-specific state for command-line mode
+ * 
+ * Represents state for one-shot command execution.
+ */
+[CmdState]
+  ApplicationState
+  
+  // Command input
+  input: Input
+  
+  // Output configuration
+  streamOutput: 𝔹
+  saveOutput: 𝔹
+  
+  // Execution flags
+  executeShellCommand: 𝔹
+  explainShellCommand: 𝔹
+  generateCode: 𝔹
+where
+  workingMode = CMD
+  
+  // CMD mode requires valid input
+  ∧ inputIsValid(input)
+  
+  // No active session in CMD mode (uses temporary session)
+  ∧ (activeSession.isSome ⇒ activeSession.value.name = TEMP_SESSION_NAME)
+  
+  // Stream output matches config
+  ∧ streamOutput = config.stream
+
+// ============================================================================
+// Server State
+// ============================================================================
+
+/**
+ * Connection state for a single client
+ */
+[ClientConnection]
+  id: String
+  ipAddress: String
+  connectedAt: Timestamp
+  requestCount: ℤ
+where
+  id.value ≠ ⟨⟩
+  ∧ requestCount ≥ 0
+
+/**
+ * Active request being processed
+ */
+[ActiveRequest]
+  connectionId: String
+  requestId: String
+  endpoint: String
+  method: String
+  startedAt: Timestamp
+  model: Option[String]
+  streaming: 𝔹
+where
+  connectionId.value ≠ ⟨⟩
+  ∧ requestId.value ≠ ⟨⟩
+  ∧ endpoint.value ≠ ⟨⟩
+
+/**
+ * Server-specific state for HTTP server mode
+ * 
+ * Manages concurrent client connections and request processing.
+ */
+[ServerState]
+  ApplicationState
+  
+  // Server configuration
+  listenAddress: String
+  listenPort: ℤ
+  
+  // Connection management
+  activeConnections: seq ClientConnection
+  activeRequests: seq ActiveRequest
+  
+  // Server statistics
+  totalRequests: ℤ
+  totalErrors: ℤ
+  uptime: ℤ
+  
+  // Server control
+  shutdownRequested: 𝔹
+where
+  workingMode = Serve
+  
+  // Valid port range
+  ∧ 1 ≤ listenPort ≤ 65535
+  
+  // Statistics are non-negative
+  ∧ totalRequests ≥ 0
+  ∧ totalErrors ≥ 0
+  ∧ uptime ≥ 0
+  
+  // All active requests belong to active connections
+  ∧ (∀ req : activeRequests 
+     • ∃ conn : activeConnections • conn.id = req.connectionId)
+  
+  // Request count matches requests processed
+  ∧ (∀ conn : activeConnections 
+     • conn.requestCount = #{req : activeRequests | req.connectionId = conn.id}
+       + #{completed requests from this connection})
+
+// ============================================================================
+// State Flags and Assertions
+// ============================================================================
+
+/**
+ * State flags using bitflags pattern
+ */
+[StateFlags]
+  flags: UInt32
+where
+  // Define flag positions
+  let INTERACTIVE = 1
+  let RAG_ACTIVE = 2
+  let AGENT_ACTIVE = 4
+  let FUNCTION_CALLING = 8
+  let SESSION_ACTIVE = 16
+  let ROLE_ACTIVE = 32
+  let STREAM_MODE = 64
+  let DRY_RUN = 128
+  in true  // Flags are just bit positions
+
+/**
+ * Compute current state flags
+ */
+stateFlags : ApplicationState → StateFlags
+stateFlags(state) = 
+  let flags = 0
+      flags = if state.workingMode = REPL then flags | 1 else flags
+      flags = if state.activeRag.isSome then flags | 2 else flags
+      flags = if state.activeAgent.isSome then flags | 4 else flags
+      flags = if state.config.functionCalling then flags | 8 else flags
+      flags = if state.activeSession.isSome then flags | 16 else flags
+      flags = if state.activeRole.isSome then flags | 32 else flags
+      flags = if state.config.stream then flags | 64 else flags
+      flags = if state.dryRunMode then flags | 128 else flags
+  in StateFlags⟨flags⟩
+
+/**
+ * Assert state consistency
+ */
+AssertState ::= Valid | InvalidConfig | InvalidSession | InvalidModel 
+              | InvalidRole | InvalidAgent | InvalidRag
+
+/**
+ * Validate application state
+ */
+validateState : ApplicationState → AssertState
+validateState(state) =
+  if ¬(state.currentModel ∈ ran state.availableModels)
+  then InvalidModel
+  else if state.activeSession.isSome 
+          ∧ ¬(state.activeSession.value ∈ ran state.sessions)
+  then InvalidSession
+  else if state.activeRole.isSome 
+          ∧ ¬(state.activeRole.value ∈ ran state.roles)
+  then InvalidRole
+  else if state.activeAgent.isSome 
+          ∧ ¬(state.activeAgent.value ∈ ran state.agents)
+  then InvalidAgent
+  else if state.activeRag.isSome 
+          ∧ ¬(state.activeRag.value ∈ ran state.rags)
+  then InvalidRag
+  else Valid
+
+// ============================================================================
+// Message Processing State
+// ============================================================================
+
+/**
+ * State during message processing pipeline
+ */
+[MessageProcessingState]
+  ApplicationState
+  
+  // Input stage
+  rawInput: Input
+  processedInput: seq Message
+  
+  // Context building stage
+  roleContext: seq Message
+  sessionContext: seq Message
+  ragContext: Option[seq String]
+  agentContext: Option[seq Message]
+  
+  // Message construction stage
+  finalMessages: seq Message
+  totalTokens: ℤ
+  needsCompression: 𝔹
+  
+  // Request stage
+  requestSent: 𝔹
+  streaming: 𝔹
+  
+  // Response stage
+  partialResponse: Option[String]
+  fullResponse: Option[String]
+  toolCalls: seq ToolCall
+  toolResults: seq ToolResult
+  
+  // Completion stage
+  completed: 𝔹
+  error: Option[String]
+where
+  // Valid input
+  inputIsValid(rawInput)
+  
+  // Processed input corresponds to raw input
+  ∧ #processedInput > 0
+  
+  // Final messages include all context
+  ∧ finalMessages = roleContext ++ sessionContext ++ processedInput ++ agentContext.value
+  
+  // Token calculation
+  ∧ totalTokens = Σ_{m ∈ finalMessages} estimateMessageTokens(m)
+  
+  // Compression needed if exceeds threshold
+  ∧ (∃ s : activeSession.value, threshold : s.compressThreshold.value
+     • needsCompression = (totalTokens > threshold))
+  
+  // Streaming matches config
+  ∧ (requestSent ⇒ streaming = config.stream)
+  
+  // Response state consistency
+  ∧ (completed ⇒ (fullResponse.isSome ∨ error.isSome))
+  ∧ (streaming ∧ ¬completed ⇒ partialResponse.isSome)
+  
+  // Tool calling state
+  ∧ (#toolCalls > 0 ⇒ #toolResults ≤ #toolCalls)
+  ∧ (∀ result : toolResults • result.call ∈ ran toolCalls)
+
+// ============================================================================
+// Session Lifecycle State
+// ============================================================================
+
+/**
+ * Session lifecycle stages
+ */
+SessionLifecycle ::= Created | Loading | Active | Saving | Compressing | Closed
+
+/**
+ * Session state during its lifecycle
+ */
+[SessionState]
+  session: Session
+  lifecycle: SessionLifecycle
+  lastActivity: Timestamp
+  autoSave: 𝔹
+where
+  (lifecycle = Created ⇒ sessionIsEmpty(session))
+  ∧ (lifecycle = Active ⇒ ¬sessionIsEmpty(session))
+  ∧ (lifecycle = Compressing ⇒ session.compressing)
+  ∧ (autoSave ⇒ session.saveSession.value = true)
+
+/**
+ * State transition for session lifecycle
+ */
+ΔSessionLifecycle
+  SessionState
+  SessionState'
+  action: String
+where
+  (action = "create" 
+   ∧ lifecycle = Created ∧ lifecycle' = Active
+   ∧ session' = session)
+  
+  ∨ (action = "load" 
+     ∧ lifecycle = Loading ∧ lifecycle' = Active
+     ∧ session'.path.isSome)
+  
+  ∨ (action = "save" 
+     ∧ lifecycle = Active ∧ lifecycle' = Saving
+     ∧ session'.dirty = false)
+  
+  ∨ (action = "compress" 
+     ∧ lifecycle = Active ∧ lifecycle' = Compressing
+     ∧ session'.tokens > session'.compressThreshold.value)
+  
+  ∨ (action = "close" 
+     ∧ lifecycle' = Closed)
+
+// ============================================================================
+// Global State Invariants
+// ============================================================================
+
+/**
+ * Global invariants that must hold for all valid application states
+ */
+[GlobalInvariants]
+  ApplicationState
+where
+  // Configuration is valid
+  validateState(this) = Valid
+  
+  // No duplicate names
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #sessions ∧ j < #sessions 
+     • sessions[i].name ≠ sessions[j].name)
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #roles ∧ j < #roles 
+     • roles[i].name ≠ roles[j].name)
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #agents ∧ j < #agents 
+     • agents[i].name ≠ agents[j].name)
+  ∧ (∀ i, j : ℕ | i ≠ j ∧ i < #rags ∧ j < #rags 
+     • rags[i].name ≠ rags[j].name)
+  
+  // Resource limits
+  ∧ #sessions ≤ 1000
+  ∧ #roles ≤ 100
+  ∧ #agents ≤ 100
+  ∧ #rags ≤ 50
+  
+  // Active session token limits
+  ∧ (∃ s : activeSession.value, max : s.model.data.maxInputTokens.value
+     • s.tokens ≤ max * 2)  // Allow 2x for compression buffer
+  
+  // Abort signal can interrupt any operation
+  ∧ (abortSignal ⇒ 
+     (∀ processing : MessageProcessingState • ¬processing.completed))
+
+/**
+ * State safety property: system never enters invalid state
+ */
+StateSafety: 
+  ∀ state : ApplicationState • validateState(state) = Valid
+  ⇒ ∀ state' : ApplicationState after any operation 
+    • validateState(state') = Valid

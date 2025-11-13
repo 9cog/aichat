@@ -1,0 +1,828 @@
+/**
+ * AIChat External Integrations Formal Specification (Z++)
+ * 
+ * This file formalizes the contracts and specifications for external
+ * service integrations including LLM provider APIs, HTTP protocols,
+ * file system operations, and function calling integrations.
+ */
+
+// ============================================================================
+// HTTP Protocol Specifications
+// ============================================================================
+
+/**
+ * HTTP method enumeration
+ */
+HttpMethod ::= GET | POST | PUT | DELETE | PATCH
+
+/**
+ * HTTP status codes
+ */
+HttpStatus ::= Ok⟨200⟩ | Created⟨201⟩ | BadRequest⟨400⟩ | Unauthorized⟨401⟩ 
+             | Forbidden⟨403⟩ | NotFound⟨404⟩ | TooManyRequests⟨429⟩ 
+             | InternalServerError⟨500⟩ | ServiceUnavailable⟨503⟩
+
+/**
+ * HTTP headers
+ */
+[HttpHeaders]
+  headers: String ⇸ String
+where
+  "Content-Type" ∈ dom headers
+  ∨ "content-type" ∈ dom headers
+
+/**
+ * HTTP request
+ */
+[HttpRequest]
+  method: HttpMethod
+  url: String
+  headers: HttpHeaders
+  body: Option[String]
+where
+  url.value ≠ ⟨⟩
+  ∧ (method ∈ {POST, PUT, PATCH} ⇒ body.isSome)
+
+/**
+ * HTTP response
+ */
+[HttpResponse]
+  status: HttpStatus
+  headers: HttpHeaders
+  body: String
+where
+  (status = Ok⟨200⟩ ∨ status = Created⟨201⟩) ⇒ body.value ≠ ⟨⟩
+
+// ============================================================================
+// LLM Provider API Contracts
+// ============================================================================
+
+/**
+ * Generic LLM API request
+ */
+[LlmApiRequest]
+  model: String
+  messages: seq Message
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  maxTokens: Option[ℤ]
+  stream: 𝔹
+  tools: Option[seq FunctionDeclaration]
+where
+  model.value ≠ ⟨⟩
+  ∧ #messages > 0
+  ∧ (∃ t : temperature.value • 0.0 ≤ t ≤ 2.0)
+  ∧ (∃ p : topP.value • 0.0 ≤ p ≤ 1.0)
+  ∧ (∃ max : maxTokens.value • max > 0)
+
+/**
+ * LLM API response (non-streaming)
+ */
+[LlmApiResponse]
+  id: String
+  model: String
+  choices: seq Choice
+  usage: Option[Usage]
+where
+  id.value ≠ ⟨⟩
+  ∧ #choices > 0
+
+/**
+ * Response choice
+ */
+[Choice]
+  index: ℤ
+  message: Message
+  finishReason: FinishReason
+where
+  index ≥ 0
+
+/**
+ * Finish reason for response
+ */
+FinishReason ::= Stop | Length | ToolCalls | ContentFilter | Error⟨String⟩
+
+/**
+ * Token usage statistics
+ */
+[Usage]
+  promptTokens: ℤ
+  completionTokens: ℤ
+  totalTokens: ℤ
+where
+  promptTokens ≥ 0
+  ∧ completionTokens ≥ 0
+  ∧ totalTokens = promptTokens + completionTokens
+
+/**
+ * Streaming chunk
+ */
+[StreamChunk]
+  id: String
+  model: String
+  choices: seq StreamChoice
+where
+  id.value ≠ ⟨⟩
+  ∧ #choices > 0
+
+[StreamChoice]
+  index: ℤ
+  delta: MessageDelta
+  finishReason: Option[FinishReason]
+where
+  index ≥ 0
+
+[MessageDelta]
+  role: Option[MessageRole]
+  content: Option[String]
+  toolCalls: Option[seq ToolCall]
+
+// ============================================================================
+// OpenAI API Contract
+// ============================================================================
+
+/**
+ * OpenAI chat completion request
+ * 
+ * Conforms to OpenAI API v1 specification
+ */
+[OpenAIChatRequest]
+  LlmApiRequest
+  frequencyPenalty: Option[Float64]
+  presencePenalty: Option[Float64]
+  user: Option[String]
+where
+  (∃ fp : frequencyPenalty.value • -2.0 ≤ fp ≤ 2.0)
+  ∧ (∃ pp : presencePenalty.value • -2.0 ≤ pp ≤ 2.0)
+
+/**
+ * OpenAI chat completion endpoint
+ * 
+ * POST https://api.openai.com/v1/chat/completions
+ */
+ΞOpenAIChatCompletion
+  request: OpenAIChatRequest
+  response: LlmApiResponse
+  error: Option[String]
+where
+  // Request validation
+  request.model.value ≠ ⟨⟩
+  ∧ #request.messages > 0
+  
+  // Authentication required
+  ∧ "Authorization" ∈ dom request.headers.headers
+  
+  // Response on success
+  ∧ (error.isSome = false ⇒ 
+     response.model = request.model
+     ∧ #response.choices > 0)
+  
+  // Error handling
+  ∧ (error.isSome ⇒ 
+     error.value ∈ {"invalid_request_error", "authentication_error", 
+                    "rate_limit_error", "server_error"})
+
+/**
+ * OpenAI embeddings request
+ */
+[OpenAIEmbeddingsRequest]
+  model: String
+  input: seq String
+  dimensions: Option[ℤ]
+where
+  model.value ≠ ⟨⟩
+  ∧ #input > 0
+  ∧ (∃ d : dimensions.value • d > 0)
+
+/**
+ * OpenAI embeddings response
+ */
+[OpenAIEmbeddingsResponse]
+  data: seq EmbeddingObject
+  usage: Usage
+where
+  #data > 0
+
+[EmbeddingObject]
+  index: ℤ
+  embedding: seq Float64
+where
+  index ≥ 0
+  ∧ #embedding > 0
+
+/**
+ * OpenAI embeddings endpoint
+ * 
+ * POST https://api.openai.com/v1/embeddings
+ */
+ΞOpenAIEmbeddings
+  request: OpenAIEmbeddingsRequest
+  response: OpenAIEmbeddingsResponse
+where
+  #response.data = #request.input
+  ∧ (∀ i : ℕ | i < #response.data • response.data[i].index = i)
+
+// ============================================================================
+// Claude (Anthropic) API Contract
+// ============================================================================
+
+/**
+ * Claude API uses different message format
+ */
+[ClaudeMessage]
+  role: MessageRole
+  content: seq ContentBlock
+where
+  role ∈ {User, Assistant}
+
+ContentBlock ::= Text⟨String⟩ | Image⟨source: ImageSource⟩ 
+               | ToolUse⟨id: String, name: String, input: JsonValue⟩
+               | ToolResult⟨toolUseId: String, content: String⟩
+
+[ImageSource]
+  type: String
+  mediaType: String
+  data: String
+where
+  type = "base64"
+  ∧ mediaType ∈ {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+/**
+ * Claude chat request
+ */
+[ClaudeChatRequest]
+  model: String
+  messages: seq ClaudeMessage
+  maxTokens: ℤ
+  system: Option[String]
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  tools: Option[seq FunctionDeclaration]
+  stream: 𝔹
+where
+  model.value ≠ ⟨⟩
+  ∧ #messages > 0
+  ∧ maxTokens > 0
+  ∧ (∃ t : temperature.value • 0.0 ≤ t ≤ 1.0)
+
+/**
+ * Claude API endpoint
+ * 
+ * POST https://api.anthropic.com/v1/messages
+ */
+ΞClaudeMessages
+  request: ClaudeChatRequest
+  response: LlmApiResponse
+  apiVersion: String
+where
+  // API version required in headers
+  apiVersion ∈ {"2023-06-01", "2024-01-01"}
+  
+  // Max tokens is required (not optional)
+  ∧ request.maxTokens > 0
+
+// ============================================================================
+// Gemini (Google AI) API Contract
+// ============================================================================
+
+/**
+ * Gemini uses different content structure
+ */
+[GeminiContent]
+  role: String
+  parts: seq GeminiPart
+where
+  role ∈ {"user", "model"}
+
+GeminiPart ::= Text⟨text: String⟩ 
+             | InlineData⟨mimeType: String, data: String⟩
+             | FunctionCall⟨name: String, args: JsonValue⟩
+             | FunctionResponse⟨name: String, response: JsonValue⟩
+
+/**
+ * Gemini generate content request
+ */
+[GeminiGenerateRequest]
+  model: String
+  contents: seq GeminiContent
+  generationConfig: Option[GenerationConfig]
+  tools: Option[seq FunctionDeclaration]
+where
+  model.value ≠ ⟨⟩
+  ∧ #contents > 0
+
+[GenerationConfig]
+  temperature: Option[Float64]
+  topP: Option[Float64]
+  topK: Option[ℤ]
+  maxOutputTokens: Option[ℤ]
+where
+  (∃ t : temperature.value • 0.0 ≤ t ≤ 2.0)
+  ∧ (∃ k : topK.value • k > 0)
+
+/**
+ * Gemini API endpoint
+ * 
+ * POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+ */
+ΞGeminiGenerateContent
+  request: GeminiGenerateRequest
+  response: LlmApiResponse
+  apiKey: String
+where
+  apiKey.value ≠ ⟨⟩
+
+// ============================================================================
+// Azure OpenAI API Contract
+// ============================================================================
+
+/**
+ * Azure OpenAI extends standard OpenAI with deployment-specific endpoints
+ */
+[AzureOpenAIRequest]
+  OpenAIChatRequest
+  deployment: String
+  apiVersion: String
+where
+  deployment.value ≠ ⟨⟩
+  ∧ apiVersion.value ≠ ⟨⟩
+
+/**
+ * Azure OpenAI endpoint
+ * 
+ * POST https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={version}
+ */
+ΞAzureOpenAIChatCompletion
+  request: AzureOpenAIRequest
+  response: LlmApiResponse
+  resourceName: String
+where
+  resourceName.value ≠ ⟨⟩
+  ∧ "api-key" ∈ dom request.headers.headers
+
+// ============================================================================
+// AWS Bedrock API Contract
+// ============================================================================
+
+/**
+ * Bedrock uses AWS Signature V4 authentication
+ */
+[BedrockRequest]
+  LlmApiRequest
+  region: String
+  accessKeyId: String
+  secretAccessKey: String
+  sessionToken: Option[String]
+where
+  region.value ≠ ⟨⟩
+  ∧ accessKeyId.value ≠ ⟨⟩
+  ∧ secretAccessKey.value ≠ ⟨⟩
+
+/**
+ * Bedrock invoke model endpoint
+ * 
+ * POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke
+ */
+ΞBedrockInvokeModel
+  request: BedrockRequest
+  response: LlmApiResponse
+  awsSignature: String
+where
+  // AWS Signature V4 required
+  awsSignature.value ≠ ⟨⟩
+
+// ============================================================================
+// Streaming Protocol (Server-Sent Events)
+// ============================================================================
+
+/**
+ * Server-Sent Event (SSE) for streaming responses
+ */
+[ServerSentEvent]
+  event: Option[String]
+  data: String
+  id: Option[String]
+  retry: Option[ℤ]
+where
+  data.value ≠ ⟨⟩
+
+/**
+ * SSE stream
+ */
+[SseStream]
+  events: seq ServerSentEvent
+  done: 𝔹
+where
+  (done ⇒ 
+   ∃ e : events • e.data = "[DONE]")
+
+/**
+ * Streaming chat completion
+ */
+ΞStreamChatCompletion
+  request: LlmApiRequest
+  stream: SseStream
+where
+  request.stream = true
+  ∧ #stream.events > 0
+  ∧ (∀ e : stream.events • parseStreamChunk(e.data))
+
+// ============================================================================
+// File System Operations
+// ============================================================================
+
+/**
+ * File path validation
+ */
+[FilePath]
+  path: String
+  isAbsolute: 𝔹
+  exists: 𝔹
+where
+  path.value ≠ ⟨⟩
+  ∧ ¬containsPathTraversal(path)
+
+/**
+ * Read file operation
+ */
+ΞReadFile
+  path: FilePath
+  content: String
+  error: Option[String]
+where
+  path.exists = true
+  ∧ (error.isSome = false ⇒ content.value ≠ ⟨⟩)
+
+/**
+ * Write file operation
+ */
+ΔWriteFile
+  path: FilePath
+  content: String
+  created: 𝔹
+  error: Option[String]
+where
+  content.value ≠ ⟨⟩
+  ∧ ensureParentExists(path)
+  ∧ (error.isSome = false ⇒ 
+     path'.exists = true ∧ created = ¬path.exists)
+
+/**
+ * List directory operation
+ */
+ΞListDirectory
+  path: FilePath
+  entries: seq FilePath
+  error: Option[String]
+where
+  path.exists = true
+  ∧ isDirectory(path)
+
+// ============================================================================
+// Document Loading
+// ============================================================================
+
+/**
+ * Document loader interface
+ */
+[DocumentLoader]
+  supportedExtensions: seq String
+  mimeTypes: seq String
+where
+  #supportedExtensions > 0
+
+/**
+ * Load document operation
+ */
+ΞLoadDocument
+  loader: DocumentLoader
+  path: FilePath
+  document: Document
+  error: Option[String]
+where
+  // File must exist
+  path.exists = true
+  
+  // Extension must be supported
+  ∧ let ext = getFileExtension(path)
+    in ext ∈ ran loader.supportedExtensions
+  
+  // Document loaded successfully
+  ∧ (error.isSome = false ⇒ 
+     document.path = path.path
+     ∧ document.content.value ≠ ⟨⟩)
+
+/**
+ * Built-in document loaders
+ */
+TEXT_LOADER: DocumentLoader = DocumentLoader⟨
+  supportedExtensions = ⟨"txt", "md", "markdown", "log"⟩,
+  mimeTypes = ⟨"text/plain", "text/markdown"⟩
+⟩
+
+PDF_LOADER: DocumentLoader = DocumentLoader⟨
+  supportedExtensions = ⟨"pdf"⟩,
+  mimeTypes = ⟨"application/pdf"⟩
+⟩
+
+HTML_LOADER: DocumentLoader = DocumentLoader⟨
+  supportedExtensions = ⟨"html", "htm"⟩,
+  mimeTypes = ⟨"text/html"⟩
+⟩
+
+// ============================================================================
+// Web Scraping Operations
+// ============================================================================
+
+/**
+ * HTTP GET request for web content
+ */
+ΞFetchUrl
+  url: String
+  content: String
+  statusCode: HttpStatus
+  error: Option[String]
+where
+  url.value ≠ ⟨⟩
+  ∧ isValidUrl(url)
+  ∧ (statusCode = Ok⟨200⟩ ⇒ content.value ≠ ⟨⟩)
+
+/**
+ * HTML to Markdown conversion
+ */
+ΞConvertHtmlToMarkdown
+  html: String
+  markdown: String
+where
+  html.value ≠ ⟨⟩
+  ∧ markdown.value ≠ ⟨⟩
+  ∧ preservesTextContent(html, markdown)
+
+// ============================================================================
+// Function Execution Integrations
+// ============================================================================
+
+/**
+ * Shell command execution
+ */
+ΞExecuteShellCommand
+  command: String
+  workingDir: Option[FilePath]
+  env: String ⇸ String
+  output: String
+  exitCode: ℤ
+  error: Option[String]
+where
+  command.value ≠ ⟨⟩
+  ∧ ¬containsMaliciousPatterns(command)
+  ∧ (exitCode = 0 ⇒ error.isSome = false)
+
+/**
+ * MCP (Model Context Protocol) server integration
+ */
+[McpServer]
+  name: String
+  command: String
+  args: seq String
+  env: String ⇸ String
+where
+  name.value ≠ ⟨⟩
+  ∧ command.value ≠ ⟨⟩
+
+/**
+ * MCP tool call
+ */
+ΞCallMcpTool
+  server: McpServer
+  toolName: String
+  arguments: JsonValue
+  result: JsonValue
+  error: Option[String]
+where
+  toolName.value ≠ ⟨⟩
+  ∧ (error.isSome = false ⇒ result ≠ Null)
+
+// ============================================================================
+// Rate Limiting
+// ============================================================================
+
+/**
+ * Rate limit configuration
+ */
+[RateLimit]
+  requestsPerMinute: ℤ
+  requestsPerDay: ℤ
+  tokensPerMinute: ℤ
+where
+  requestsPerMinute > 0
+  ∧ requestsPerDay > 0
+  ∧ tokensPerMinute > 0
+
+/**
+ * Rate limiter state
+ */
+[RateLimiterState]
+  limit: RateLimit
+  currentMinuteRequests: ℤ
+  currentDayRequests: ℤ
+  currentMinuteTokens: ℤ
+  windowStart: Timestamp
+where
+  currentMinuteRequests ≤ limit.requestsPerMinute
+  ∧ currentDayRequests ≤ limit.requestsPerDay
+  ∧ currentMinuteTokens ≤ limit.tokensPerMinute
+
+/**
+ * Check rate limit
+ */
+ΞCheckRateLimit
+  state: RateLimiterState
+  requestTokens: ℤ
+  allowed: 𝔹
+where
+  allowed = (state.currentMinuteRequests < state.limit.requestsPerMinute)
+          ∧ (state.currentDayRequests < state.limit.requestsPerDay)
+          ∧ (state.currentMinuteTokens + requestTokens ≤ state.limit.tokensPerMinute)
+
+/**
+ * Update rate limit after request
+ */
+ΔUpdateRateLimit
+  RateLimiterState
+  RateLimiterState'
+  requestTokens: ℤ
+where
+  currentMinuteRequests' = currentMinuteRequests + 1
+  ∧ currentDayRequests' = currentDayRequests + 1
+  ∧ currentMinuteTokens' = currentMinuteTokens + requestTokens
+
+// ============================================================================
+// Error Handling & Retry Logic
+// ============================================================================
+
+/**
+ * Retry configuration
+ */
+[RetryConfig]
+  maxRetries: ℤ
+  initialDelay: ℤ
+  maxDelay: ℤ
+  backoffMultiplier: Float64
+where
+  maxRetries ≥ 0
+  ∧ initialDelay > 0
+  ∧ maxDelay > initialDelay
+  ∧ backoffMultiplier.value > 1.0
+
+/**
+ * Retry state
+ */
+[RetryState]
+  config: RetryConfig
+  attemptNumber: ℤ
+  lastError: Option[String]
+  nextDelay: ℤ
+where
+  0 ≤ attemptNumber ≤ config.maxRetries
+  ∧ nextDelay ≤ config.maxDelay
+
+/**
+ * Calculate next retry delay (exponential backoff)
+ */
+calculateRetryDelay : RetryState → ℤ
+calculateRetryDelay(state) = 
+  min(state.config.maxDelay,
+      ⌊state.config.initialDelay * 
+       (state.config.backoffMultiplier.value ^ state.attemptNumber)⌋)
+
+/**
+ * Retry operation with exponential backoff
+ */
+ΔRetryOperation
+  RetryState
+  RetryState'
+  operation: ApplicationState → (ApplicationState × Option[String])
+  success: 𝔹
+where
+  attemptNumber < config.maxRetries
+  ∧ let (_, error) = operation(initialState)
+    in (error.isSome ⇒ 
+        attemptNumber' = attemptNumber + 1
+        ∧ lastError' = error
+        ∧ nextDelay' = calculateRetryDelay(RetryState')
+        ∧ success = false)
+       ∧ (error.isSome = false ⇒ success = true)
+
+// ============================================================================
+// Authentication & Security
+// ============================================================================
+
+/**
+ * API key authentication
+ */
+[ApiKeyAuth]
+  headerName: String
+  headerValue: String
+where
+  headerName ∈ {"Authorization", "api-key", "x-api-key"}
+  ∧ headerValue.value ≠ ⟨⟩
+
+/**
+ * OAuth2 authentication
+ */
+[OAuth2Auth]
+  accessToken: String
+  tokenType: String
+  expiresAt: Option[Timestamp]
+where
+  accessToken.value ≠ ⟨⟩
+  ∧ tokenType ∈ {"Bearer", "bearer"}
+
+/**
+ * AWS Signature V4 authentication
+ */
+[AwsSignatureV4]
+  accessKeyId: String
+  secretAccessKey: String
+  region: String
+  service: String
+  signedHeaders: String
+  signature: String
+where
+  accessKeyId.value ≠ ⟨⟩
+  ∧ secretAccessKey.value ≠ ⟨⟩
+  ∧ signature.value ≠ ⟨⟩
+
+/**
+ * Validate authentication
+ */
+ΞValidateAuth
+  auth: ApiKeyAuth | OAuth2Auth | AwsSignatureV4
+  valid: 𝔹
+  error: Option[String]
+where
+  (auth is ApiKeyAuth ⇒ 
+   valid = (auth.headerValue.value ≠ ⟨⟩))
+  ∧ (auth is OAuth2Auth ⇒ 
+   valid = (auth.accessToken.value ≠ ⟨⟩ 
+            ∧ (auth.expiresAt.isSome ⇒ 
+               auth.expiresAt.value.seconds > currentTime())))
+
+// ============================================================================
+// Integration Invariants
+// ============================================================================
+
+/**
+ * External integration safety properties
+ */
+[IntegrationSafety]
+  
+  // All HTTP requests must have authentication
+  ∀ req : HttpRequest to LLM provider 
+    • ("Authorization" ∈ dom req.headers.headers
+       ∨ "api-key" ∈ dom req.headers.headers
+       ∨ "x-api-key" ∈ dom req.headers.headers)
+  
+  // All file paths must be validated
+  ∧ ∀ path : FilePath 
+    • ¬containsPathTraversal(path)
+  
+  // All shell commands must be sanitized
+  ∧ ∀ cmd : String executed as shell command
+    • ¬containsMaliciousPatterns(cmd)
+  
+  // Rate limits must be respected
+  ∧ ∀ state : RateLimiterState 
+    • state.currentMinuteRequests ≤ state.limit.requestsPerMinute
+  
+  // Retry logic must have bounded attempts
+  ∧ ∀ state : RetryState 
+    • state.attemptNumber ≤ state.config.maxRetries
+  
+  // Streaming must handle connection errors gracefully
+  ∧ ∀ stream : SseStream 
+    • (stream.done ∨ connectionAlive(stream))
+
+/**
+ * Helper predicates for security validation
+ */
+containsPathTraversal : String → 𝔹
+containsPathTraversal(path) = 
+  contains(path, "..") ∨ contains(path, "~")
+
+containsMaliciousPatterns : String → 𝔹
+containsMaliciousPatterns(cmd) = 
+  contains(cmd, "rm -rf /") 
+  ∨ contains(cmd, "; rm ")
+  ∨ contains(cmd, "| rm ")
+  ∨ contains(cmd, "&& rm ")
+
+isValidUrl : String → 𝔹
+isValidUrl(url) = 
+  startsWith(url, "http://") ∨ startsWith(url, "https://")
+
+preservesTextContent : String × String → 𝔹
+preservesTextContent(html, markdown) = 
+  let htmlText = extractText(html)
+      mdText = extractText(markdown)
+  in similarity(htmlText, mdText) > 0.9
