@@ -17,19 +17,7 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native")
 endif()
 
-# Find or fetch GGML
-find_package(ggml QUIET)
-if(NOT ggml_FOUND)
-    include(FetchContent)
-    FetchContent_Declare(
-        ggml
-        GIT_REPOSITORY https://github.com/ggerganov/ggml.git
-        GIT_TAG master
-    )
-    FetchContent_MakeAvailable(ggml)
-endif()
-
-# Find or fetch llama.cpp
+# Fetch llama.cpp (which bundles its own compatible GGML)
 find_package(llama QUIET)
 if(NOT llama_FOUND)
     include(FetchContent)
@@ -41,12 +29,17 @@ if(NOT llama_FOUND)
     set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(llama)
+    # Expose llama.cpp-bundled GGML headers
+    set(GGML_INCLUDE_DIR ${llama_SOURCE_DIR}/ggml/include)
+else()
+    set(GGML_INCLUDE_DIR "")
 endif()
 
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${GGML_INCLUDE_DIR}
 )
 
 # Core library sources
@@ -59,19 +52,29 @@ set(AICHAT_CORE_SOURCES
     src/cognitive/ecan.cpp
     src/cognitive/pln.cpp
     src/cognitive/esn.cpp
+    src/cognitive/cogloop.cpp
     src/llm/inference.cpp
     src/llm/chat.cpp
     src/cli/parser.cpp
     src/cli/repl.cpp
+    src/cli/session.cpp
 )
 
 # Core library
 add_library(aichat-core ${AICHAT_CORE_SOURCES})
-target_link_libraries(aichat-core PUBLIC ggml llama)
-target_include_directories(aichat-core PUBLIC 
+target_link_libraries(aichat-core PUBLIC llama ggml)
+target_include_directories(aichat-core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
 )
+
+# Optional: readline for REPL line editing
+find_library(READLINE_LIB readline)
+if(READLINE_LIB)
+    target_compile_definitions(aichat-core PRIVATE HAVE_READLINE)
+    target_link_libraries(aichat-core PRIVATE ${READLINE_LIB})
+endif()
 
 # Main executable
 add_executable(aichat src/main.cpp)
