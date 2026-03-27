@@ -30,60 +30,10 @@ Session history         → /ai/sessions/{id}/history
 ### Provider Abstraction
 
 aichat's client abstraction (`src/client/`) is the backend for all
-framework AI operations. When a user writes to `/ai/sessions/{id}/ctl`,
-the request flows through:
+framework AI operations:
 
 ```
 9P write → aifs.Session → aichat client → LLM API → response → 9P read
-```
-
-### Supported Providers via Framework
-
-| Provider | Models | Via aichat |
-|----------|--------|------------|
-| Anthropic | Claude Opus/Sonnet/Haiku | `src/client/claude.rs` |
-| OpenAI | GPT-4o, GPT-4o-mini | `src/client/openai.rs` |
-| Google | Gemini 2.5 Pro/Flash | `src/client/gemini.rs` |
-| AWS | Bedrock models | `src/client/bedrock.rs` |
-| Azure | Azure OpenAI | `src/client/azure_openai.rs` |
-| Cohere | Command R+ | `src/client/cohere.rs` |
-| OpenAI-compatible | Ollama, Groq, Mistral, etc. | `src/client/openai_compatible.rs` |
-
-### RAG Integration
-
-aichat's RAG system feeds the knowledge graph:
-
-```
-1. Document ingestion → embeddings → vector index
-2. Query → BM25 + vector search → reranking → results
-3. Results → knowledge graph nodes → /ai/knowledge/concepts/
-```
-
-### Key Files for Integration
-
-| File | Purpose |
-|------|--------|
-| `src/client/mod.rs` | Provider abstraction interface |
-| `src/config/mod.rs` | Configuration engine |
-| `src/rag/mod.rs` | RAG pipeline |
-| `src/serve.rs` | HTTP server (reference for 9P server) |
-| `src/config/session.rs` | Session management |
-| `models.yaml` | 1000+ model definitions |
-
-## Architecture
-
-```
-┌──────────────────────────────────┐
-│  /ai/sessions/  /ai/models/     │  9P filesystem
-├──────────────────────────────────┤
-│  aifs (Go, in 9fs9rc)           │  Framework core
-├──────────────────────────────────┤
-│  aichat (Rust, this repo)       │  AI engine
-│  ├── client/ (20+ providers)    │
-│  ├── rag/ (embeddings + BM25)   │
-│  ├── config/ (sessions, roles)  │
-│  └── serve.rs (HTTP reference)  │
-└──────────────────────────────────┘
 ```
 
 ## See Also
