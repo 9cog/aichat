@@ -60,6 +60,8 @@ set(AICHAT_CORE_SOURCES
     src/cli/parser.cpp
     src/cli/repl.cpp
     src/cli/session.cpp
+    src/rag/rag.cpp
+    src/function/function.cpp
 )
 
 # Core library
