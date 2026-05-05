@@ -38,7 +38,42 @@ This manifest documents all implemented kernel functions following the OpenCog C
 | `hgfs_alloc()` | ✅ DONE | hgfs.c | Allocate GGML tensor node | ≤1µs |
 | `hgfs_edge()` | ✅ DONE | hgfs.c | Create hypergraph edge | ≤500ns |
 
-### AtomSpace Functions
+### Sync Functions
+
+| Function | Status | File | Description | Performance Target |
+|----------|--------|------|-------------|-------------------|
+| `kern_mutex_init()` | ✅ DONE | sync.c | Create POSIX-backed mutex | N/A |
+| `kern_mutex_lock()` | ✅ DONE | sync.c | Lock mutex (blocking) | N/A |
+| `kern_mutex_trylock()` | ✅ DONE | sync.c | Lock mutex (non-blocking) | N/A |
+| `kern_mutex_unlock()` | ✅ DONE | sync.c | Unlock mutex | N/A |
+| `kern_mutex_destroy()` | ✅ DONE | sync.c | Destroy mutex | N/A |
+| `kern_spinlock_init()` | ✅ DONE | sync.c | Create atomic spinlock | N/A |
+| `kern_spinlock_lock()` | ✅ DONE | sync.c | Acquire spinlock (busy-wait) | N/A |
+| `kern_spinlock_trylock()` | ✅ DONE | sync.c | Try-acquire spinlock | N/A |
+| `kern_spinlock_unlock()` | ✅ DONE | sync.c | Release spinlock | N/A |
+| `kern_spinlock_destroy()` | ✅ DONE | sync.c | Destroy spinlock | N/A |
+| `kern_sem_init()` | ✅ DONE | sync.c | Create counting semaphore | N/A |
+| `kern_sem_wait()` | ✅ DONE | sync.c | Decrement semaphore (blocking) | N/A |
+| `kern_sem_trywait()` | ✅ DONE | sync.c | Decrement semaphore (non-blocking) | N/A |
+| `kern_sem_post()` | ✅ DONE | sync.c | Increment semaphore | N/A |
+| `kern_sem_getvalue()` | ✅ DONE | sync.c | Read semaphore counter | N/A |
+| `kern_sem_destroy()` | ✅ DONE | sync.c | Destroy semaphore | N/A |
+
+### Timer Functions
+
+| Function | Status | File | Description | Performance Target |
+|----------|--------|------|-------------|-------------------|
+| `kern_timer_create()` | ✅ DONE | timer.c | Create high-resolution timer | N/A |
+| `kern_timer_start()` | ✅ DONE | timer.c | Record start timestamp | N/A |
+| `kern_timer_stop()` | ✅ DONE | timer.c | Record stop timestamp | N/A |
+| `kern_timer_elapsed_ns()` | ✅ DONE | timer.c | Elapsed nanoseconds | ≤100ns overhead |
+| `kern_timer_elapsed_us()` | ✅ DONE | timer.c | Elapsed microseconds | ≤100ns overhead |
+| `kern_timer_elapsed_ms()` | ✅ DONE | timer.c | Elapsed milliseconds | ≤100ns overhead |
+| `kern_timer_reset()` | ✅ DONE | timer.c | Reset timer to initial state | N/A |
+| `kern_timer_is_running()` | ✅ DONE | timer.c | Query running state | N/A |
+| `kern_timer_destroy()` | ✅ DONE | timer.c | Destroy timer | N/A |
+
+
 
 | Function | Status | File | Description | Performance Target |
 |----------|--------|------|-------------|-------------------|
@@ -115,15 +150,15 @@ Following the traditional OS kernel design:
 | 1. Boot | ✅ DONE | `kern_bootstrap_init()` with 4 stages |
 | 2. Scheduling | ✅ DONE | `dtesn_sched_*()` with priority/depth |
 | 3. Memory | ✅ DONE | `dtesn_mem_*()` tensor-backed allocator |
-| 4. Interrupts | ⏳ TODO | Hardware interrupt handling |
-| 5. Syscalls | ⏳ TODO | Cognitive syscall interface |
-| 6. I/O | ⏳ TODO | Async I/O operations |
-| 7. Sync | ⏳ TODO | Mutex, semaphore primitives |
-| 8. Timers | ⏳ TODO | High-resolution timers |
+| 4. Sync | ✅ DONE | `kern_mutex_*()`, `kern_spinlock_*()`, `kern_sem_*()` |
+| 5. Timers | ✅ DONE | `kern_timer_*()` nanosecond-resolution |
+| 6. Interrupts | ⏳ TODO | Hardware interrupt handling |
+| 7. Syscalls | ⏳ TODO | Cognitive syscall interface |
+| 8. I/O | ⏳ TODO | Async I/O operations |
 | 9. Protection | ⏳ TODO | Memory protection/isolation |
 | 10. ABI | ⏳ TODO | Binary interface definition |
 
-**Status**: 3/10 core primitives implemented (30%)
+**Status**: 5/10 core primitives implemented (50%)
 
 ## Performance Benchmarks
 
@@ -170,22 +205,24 @@ Following the traditional OS kernel design:
 
 ### Phase 4: Extended Kernel Primitives
 
-1. **Interrupts**: Hardware interrupt handling for real-time events
-2. **Syscalls**: Cognitive syscall interface for AtomSpace operations
-3. **I/O**: Async I/O for file operations and network
-4. **Sync**: Mutex and semaphore primitives for multi-threading
-5. **Timers**: High-resolution timers for scheduling
-6. **Protection**: Memory protection and process isolation
-7. **ABI**: Binary interface for plugin architecture
+- [x] Sync – mutex, spinlock, semaphore (`sync.c`)
+- [x] Timers – nanosecond-resolution monotonic timers (`timer.c`)
+- [ ] Interrupts: Hardware interrupt handling for real-time events
+- [ ] Syscalls: Cognitive syscall interface for AtomSpace operations
+- [ ] I/O: Async I/O for file operations and network
+- [ ] Protection: Memory protection and process isolation
+- [ ] ABI: Binary interface for plugin architecture
 
 ### Phase 5: Advanced Cognitive Features
 
-1. **CognitiveLoop**: Full event loop orchestration
-2. **Multi-Model**: Support for multiple LLM models
-3. **Function Calling**: LLM function/tool calling
-4. **RAG**: Retrieval-augmented generation
-5. **Session Management**: Persistent conversation sessions
-6. **Role/Agent**: Role and agent support
+- [x] CognitiveLoop: Full event loop orchestration (`cogloop.cpp`)
+- [x] Session Management: Persistent JSON conversation sessions (`session.cpp`)
+- [x] System prompt / role CLI flag (`-p/--system`)
+- [x] Session REPL integration (`-S/--session`, `/clear`, `/history`)
+- [ ] Multi-Model: Support for multiple LLM models
+- [ ] Function Calling: LLM function/tool calling
+- [ ] RAG: Retrieval-augmented generation
+- [ ] Role/Agent: Role and agent support
 
 ### Phase 6: Distributed Computing
 
@@ -235,11 +272,15 @@ Following the traditional OS kernel design:
 | Scheduler | test_kernel.c | 1 | ✅ PASS |
 | Memory | test_kernel.c | 1 | ✅ PASS |
 | HGFS | test_kernel.c | 1 | ✅ PASS |
+| Sync | test_kernel.c | 1 | ✅ PASS |
+| Timers | test_kernel.c | 1 | ✅ PASS |
 | AtomSpace | test_cognitive.cpp | 1 | ✅ PASS |
 | ECAN | test_cognitive.cpp | 1 | ✅ PASS |
 | PLN | test_cognitive.cpp | 1 | ✅ PASS |
 | ESN | test_cognitive.cpp | 1 | ✅ PASS |
-| **Total** | - | **8** | **✅ 8/8** |
+| CognitiveLoop | test_cogloop.cpp | 3 | ✅ PASS |
+| Session | test_session.cpp | 2 | ✅ PASS |
+| **Total** | - | **15** | **✅ 15/15** |
 
 ---
 

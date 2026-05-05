@@ -15,17 +15,21 @@ static void print_usage(const char* program) {
     printf("Usage: %s [OPTIONS] [QUERY]\n", program);
     printf("\n");
     printf("Options:\n");
-    printf("  -m, --model PATH     Path to GGUF model file\n");
-    printf("  -c, --config PATH    Path to configuration file\n");
-    printf("  -r, --repl           Start in REPL mode\n");
-    printf("  -s, --stream         Enable streaming output\n");
-    printf("  -t, --temperature T  Sampling temperature (default: 0.7)\n");
-    printf("  -n, --max-tokens N   Maximum tokens to generate (default: 512)\n");
-    printf("  -h, --help           Show this help message\n");
+    printf("  -m, --model PATH       Path to GGUF model file\n");
+    printf("  -c, --config PATH      Path to configuration file\n");
+    printf("  -r, --repl             Start in REPL mode\n");
+    printf("  -s, --stream           Enable streaming output\n");
+    printf("  -t, --temperature T    Sampling temperature (default: 0.7)\n");
+    printf("  -n, --max-tokens N     Maximum tokens to generate (default: 512)\n");
+    printf("  -S, --session PATH     Session file for conversation persistence\n");
+    printf("  -p, --system PROMPT    System prompt to prepend to each conversation\n");
+    printf("  -h, --help             Show this help message\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s -m model.gguf \"Hello, how are you?\"\n", program);
     printf("  %s -r -m model.gguf\n", program);
+    printf("  %s -r -m model.gguf -S my_session.json\n", program);
+    printf("  %s -m model.gguf -p \"You are a helpful assistant.\" \"Hello\"\n", program);
 }
 
 /**
@@ -37,12 +41,14 @@ extern "C" int cli_parse_args(int argc, char** argv, cli_config_t* config) {
     }
     
     /* Initialize defaults */
-    config->model_path = nullptr;
-    config->config_path = nullptr;
-    config->repl_mode = false;
-    config->stream = false;
-    config->temperature = 0.7f;
-    config->max_tokens = 512;
+    config->model_path   = nullptr;
+    config->config_path  = nullptr;
+    config->session_path = nullptr;
+    config->system_prompt = nullptr;
+    config->repl_mode    = false;
+    config->stream       = false;
+    config->temperature  = 0.7f;
+    config->max_tokens   = 512;
     
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -85,6 +91,22 @@ extern "C" int cli_parse_args(int argc, char** argv, cli_config_t* config) {
                 config->max_tokens = atoi(argv[++i]);
             } else {
                 fprintf(stderr, "Error: -n requires an argument\n");
+                return -1;
+            }
+        }
+        else if (strcmp(argv[i], "-S") == 0 || strcmp(argv[i], "--session") == 0) {
+            if (i + 1 < argc) {
+                config->session_path = argv[++i];
+            } else {
+                fprintf(stderr, "Error: -S requires an argument\n");
+                return -1;
+            }
+        }
+        else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--system") == 0) {
+            if (i + 1 < argc) {
+                config->system_prompt = argv[++i];
+            } else {
+                fprintf(stderr, "Error: -p requires an argument\n");
                 return -1;
             }
         }

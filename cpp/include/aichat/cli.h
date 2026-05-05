@@ -21,6 +21,8 @@ extern "C" {
 typedef struct {
     const char* model_path;
     const char* config_path;
+    const char* session_path;   /**< Optional session file path for persistence */
+    const char* system_prompt;  /**< Optional system prompt to prepend */
     bool repl_mode;
     bool stream;
     float temperature;

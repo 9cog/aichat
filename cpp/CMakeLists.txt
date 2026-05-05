@@ -48,6 +48,8 @@ set(AICHAT_CORE_SOURCES
     src/kernel/scheduler.c
     src/kernel/memory.c
     src/kernel/hgfs.c
+    src/kernel/sync.c
+    src/kernel/timer.c
     src/cognitive/atomspace.cpp
     src/cognitive/ecan.cpp
     src/cognitive/pln.cpp
@@ -63,6 +65,10 @@ set(AICHAT_CORE_SOURCES
 # Core library
 add_library(aichat-core ${AICHAT_CORE_SOURCES})
 target_link_libraries(aichat-core PUBLIC llama ggml)
+
+# pthreads required by sync.c
+find_package(Threads REQUIRED)
+target_link_libraries(aichat-core PRIVATE Threads::Threads)
 target_include_directories(aichat-core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
