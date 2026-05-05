@@ -7,6 +7,7 @@
 
 #include "aichat/cognitive.h"
 #include <ggml.h>
+#include <ggml-cpu.h>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>

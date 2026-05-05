@@ -27,7 +27,9 @@ extern "C" {
 /* Kernel subsystem headers */
 #include "aichat/kernel.h"
 #include "aichat/cognitive.h"
+#include "aichat/cogloop.h"
 #include "aichat/llm.h"
+#include "aichat/session.h"
 #include "aichat/cli.h"
 
 /**
