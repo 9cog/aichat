@@ -18,6 +18,8 @@ add_test(NAME kernel_bootstrap COMMAND test_kernel bootstrap)
 add_test(NAME kernel_scheduler COMMAND test_kernel scheduler)
 add_test(NAME kernel_memory COMMAND test_kernel memory)
 add_test(NAME kernel_hgfs COMMAND test_kernel hgfs)
+add_test(NAME kernel_sync COMMAND test_kernel sync)
+add_test(NAME kernel_timer COMMAND test_kernel timer)
 
 add_test(NAME cognitive_atomspace COMMAND test_cognitive atomspace)
 add_test(NAME cognitive_ecan COMMAND test_cognitive ecan)

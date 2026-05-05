@@ -241,11 +241,14 @@ All dependencies auto-fetched by CMake:
 ## Future Enhancements
 
 ### Near Term
-- [ ] Complete remaining kernel primitives (7/10)
-- [ ] Full CognitiveLoop orchestration
+- [x] CognitiveLoop orchestration
+- [x] Session persistence
+- [x] Kernel sync primitives (mutex, spinlock, semaphore)
+- [x] Kernel high-resolution timers
+- [x] System prompt / role support in CLI (`-p/--system`)
+- [x] Session integration in REPL (`-S/--session`)
 - [ ] RAG integration
 - [ ] Function calling
-- [ ] Session persistence
 
 ### Medium Term
 - [ ] Multi-threading support
