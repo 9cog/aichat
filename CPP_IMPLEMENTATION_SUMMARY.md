@@ -247,8 +247,8 @@ All dependencies auto-fetched by CMake:
 - [x] Kernel high-resolution timers
 - [x] System prompt / role support in CLI (`-p/--system`)
 - [x] Session integration in REPL (`-S/--session`)
-- [ ] RAG integration
-- [ ] Function calling
+- [x] RAG integration
+- [x] Function calling
 
 ### Medium Term
 - [ ] Multi-threading support

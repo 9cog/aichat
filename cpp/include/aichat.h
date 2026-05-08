@@ -30,6 +30,8 @@ extern "C" {
 #include "aichat/cogloop.h"
 #include "aichat/llm.h"
 #include "aichat/session.h"
+#include "aichat/rag.h"
+#include "aichat/function.h"
 #include "aichat/cli.h"
 
 /**
