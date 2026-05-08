@@ -152,6 +152,7 @@ AIChat supports custom dark and light themes, which highlight response text and 
 
 ## Documentation
 
+- [C/C++ implementation guide](cpp/README.md)
 - [Chat-REPL Guide](https://github.com/sigoden/aichat/wiki/Chat-REPL-Guide)
 - [Command-Line Guide](https://github.com/sigoden/aichat/wiki/Command-Line-Guide)
 - [Role Guide](https://github.com/sigoden/aichat/wiki/Role-Guide)
