@@ -1,0 +1,22 @@
+{
+  "name": "aichat-aicpp",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "postCreateCommand": "cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON -DBUILD_EXAMPLES=OFF",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "cmake.buildDirectory": "${workspaceFolder}/cpp/build",
+        "cmake.configureOnOpen": false,
+        "cmake.sourceDirectory": "${workspaceFolder}/cpp"
+      },
+      "extensions": [
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "twxs.cmake"
+      ]
+    }
+  }
+}

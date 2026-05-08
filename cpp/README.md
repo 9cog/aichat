@@ -39,6 +39,10 @@ sudo apt-get install cmake build-essential libreadline-dev
 # GGML and llama.cpp are fetched automatically by CMake
 ```
 
+### Dev Container
+
+If you use VS Code or GitHub Codespaces, open the repository in the bundled dev container at `/.devcontainer/devcontainer.json`. It installs the C/C++ toolchain, `readline`, `ninja`, and `doxygen`, then bootstraps `cpp/build` with a ready-to-build CMake configuration.
+
 ### Build Steps
 
 ```bash
@@ -97,6 +101,11 @@ ctest
 ./tests/test_kernel bootstrap
 ./tests/test_cognitive atomspace
 ```
+
+## CI and Release Automation
+
+- **CI**: `.github/workflows/aicpp-ci.yaml` builds and tests the `cpp/` implementation on Ubuntu and macOS for pull requests, pushes to `main`, and manual runs.
+- **Release**: `.github/workflows/aicpp-release.yaml` rebuilds, tests, installs, and publishes versioned `aicpp` archives to GitHub Releases for `v*` tags, while also exposing packaged artifacts for manual workflow runs.
 
 ## API Documentation
 

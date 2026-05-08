@@ -1,0 +1,76 @@
+name: aicpp Release
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    name: Package aicpp (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            install-command: sudo apt-get update && sudo apt-get install -y libreadline-dev ninja-build
+          - os: macos-latest
+            install-command: brew install ninja readline
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ${{ matrix.install-command }}
+
+      - name: Configure
+        run: cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build cpp/build --parallel
+
+      - name: Test
+        run: ctest --test-dir cpp/build --output-on-failure
+
+      - name: Package install tree
+        id: package
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euxo pipefail
+
+          archive_suffix="$(echo "${RUNNER_OS}-${RUNNER_ARCH}" | tr '[:upper:]' '[:lower:]')"
+          package_root="$RUNNER_TEMP/aicpp-${VERSION}-${archive_suffix}"
+          archive_path="$PWD/aicpp-${VERSION}-${archive_suffix}.tar.gz"
+
+          cmake --install cpp/build --prefix "$package_root"
+          cp cpp/README.md \
+             cpp/QUICKSTART.md \
+             cpp/IMPLEMENTATION_NOTES.md \
+             cpp/KERNEL_FUNCTION_MANIFEST.md \
+             cpp/VALIDATION_REPORT.md \
+             "$package_root/"
+
+          tar -C "$RUNNER_TEMP" -czf "$archive_path" "$(basename "$package_root")"
+          echo "archive=$archive_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aicpp-${{ matrix.os }}
+          path: ${{ steps.package.outputs.archive }}
+
+      - name: Publish archive
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.archive }}

@@ -1,0 +1,50 @@
+name: aicpp CI
+
+on:
+  pull_request:
+    paths:
+      - .devcontainer/**
+      - .github/workflows/aicpp-ci.yaml
+      - .github/workflows/aicpp-release.yaml
+      - cpp/**
+  push:
+    branches:
+      - main
+    paths:
+      - .devcontainer/**
+      - .github/workflows/aicpp-ci.yaml
+      - .github/workflows/aicpp-release.yaml
+      - cpp/**
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            install-command: sudo apt-get update && sudo apt-get install -y libreadline-dev ninja-build
+          - os: macos-latest
+            install-command: brew install ninja readline
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: ${{ matrix.install-command }}
+
+      - name: Configure
+        run: cmake -S cpp -B cpp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON -DBUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build cpp/build --parallel
+
+      - name: Test
+        run: ctest --test-dir cpp/build --output-on-failure

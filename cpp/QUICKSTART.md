@@ -15,6 +15,10 @@ brew install cmake readline
 sudo dnf install -y cmake gcc-c++ readline-devel git
 ```
 
+### Fastest Setup: Dev Container
+
+Open the repository in the included dev container (`/.devcontainer/devcontainer.json`) to get a preconfigured Ubuntu-based C/C++ environment with `cmake`, `ninja`, `readline`, and a bootstrapped `cpp/build` directory.
+
 ### Build
 
 ```bash
@@ -205,6 +209,11 @@ brew install readline                  # macOS
 - **Validation Report**: `cpp/VALIDATION_REPORT.md`
 
 ## Getting Help
+
+### Automation
+
+- CI workflow: `.github/workflows/aicpp-ci.yaml`
+- Release workflow: `.github/workflows/aicpp-release.yaml`
 
 ### Check Logs
 
