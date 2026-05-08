@@ -10,6 +10,7 @@
  */
 
 #include "aichat/kernel.h"
+#include "aichat/cognitive.h"
 #include <ggml.h>
 #include <stdio.h>
 #include <stdlib.h>
